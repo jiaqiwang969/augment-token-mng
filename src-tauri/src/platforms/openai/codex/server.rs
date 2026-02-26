@@ -6,7 +6,9 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use hyper::{Body, Response};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use warp::http::{HeaderMap, Method, StatusCode};
@@ -22,6 +24,102 @@ use super::{
 };
 use crate::data::storage::common::traits::AccountStorage;
 use crate::AppState;
+
+// ==================== 不支持参数缓存 ====================
+
+const UNSUPPORTED_PARAMS_FILE: &str = "codex_unsupported_params.json";
+
+/// 已知的不支持参数，首次启动时预置
+const BUILTIN_UNSUPPORTED_PARAMS: &[&str] = &[
+    "max_output_tokens",
+    "prompt_cache_retention",
+    "safety_identifier",
+];
+
+/// 缓存 ChatGPT Codex 后端不支持的请求参数。
+/// 内存中用 HashSet 做快速查询，同时持久化到 JSON 文件，重启后自动恢复。
+pub struct UnsupportedParamCache {
+    params: RwLock<HashSet<String>>,
+    file_path: PathBuf,
+}
+
+impl UnsupportedParamCache {
+    /// 从 JSON 文件加载已知的不支持参数，文件不存在则用内置列表初始化
+    pub fn load(app_data_dir: &std::path::Path) -> Self {
+        let file_path = app_data_dir.join(UNSUPPORTED_PARAMS_FILE);
+        let mut params = if file_path.exists() {
+            std::fs::read_to_string(&file_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .map(|v| v.into_iter().collect::<HashSet<String>>())
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+
+        // 合并内置的已知不支持参数
+        let mut dirty = false;
+        for &p in BUILTIN_UNSUPPORTED_PARAMS {
+            if params.insert(p.to_string()) {
+                dirty = true;
+            }
+        }
+
+        // 有新增则写回磁盘
+        if dirty {
+            let vec: Vec<&String> = params.iter().collect();
+            if let Ok(json) = serde_json::to_string_pretty(&vec) {
+                let _ = std::fs::create_dir_all(app_data_dir);
+                let _ = std::fs::write(&file_path, json);
+            }
+        }
+
+        if !params.is_empty() {
+            println!(
+                "[Codex] Loaded {} cached unsupported params: {:?}",
+                params.len(),
+                params
+            );
+        }
+        Self {
+            params: RwLock::new(params),
+            file_path,
+        }
+    }
+
+    /// 添加一个不支持的参数，同时写入磁盘
+    pub async fn add(&self, param: String) {
+        let mut set = self.params.write().await;
+        if set.insert(param.clone()) {
+            println!("[Codex] Caching unsupported param: {}", param);
+            let vec: Vec<&String> = set.iter().collect();
+            if let Ok(json) = serde_json::to_string_pretty(&vec) {
+                let _ = std::fs::write(&self.file_path, json);
+            }
+        }
+    }
+
+    /// 从 JSON body 中移除所有已知的不支持参数，返回清理后的 body（None 表示无需修改）
+    pub async fn strip_known_params(&self, body: &Bytes) -> Option<Bytes> {
+        let set = self.params.read().await;
+        if set.is_empty() {
+            return None;
+        }
+        let mut root: Value = serde_json::from_slice(body).ok()?;
+        let obj = root.as_object_mut()?;
+        let mut modified = false;
+        for param in set.iter() {
+            if obj.remove(param).is_some() {
+                modified = true;
+            }
+        }
+        if modified {
+            serde_json::to_vec(&root).ok().map(Bytes::from)
+        } else {
+            None
+        }
+    }
+}
 
 /// Codex API 服务器
 pub struct CodexServer {
@@ -124,64 +222,148 @@ async fn handle_passthrough(
     let request_format = infer_request_format(&path).to_string();
     let request_model = extract_model_from_json_bytes(&body).unwrap_or_else(|| "unknown".to_string());
 
-    let (body, stream_forced) = if request_format == "openai-responses" {
+    let is_responses = request_format == "openai-responses";
+
+    let (mut body, stream_forced) = if is_responses {
         let result = normalize_responses_body(&body);
         (result.body.unwrap_or(body), result.stream_forced)
     } else {
         (body, false)
     };
 
-    let forward_request = ForwardRequest {
-        method,
-        path: path.clone(),
-        query,
-        headers,
-        body,
-        format: request_format.clone(),
-        model: request_model.clone(),
-    };
-
-    let (upstream_response, meta) = match executor.forward(forward_request).await {
-        Ok(ok) => ok,
-        Err(err) => {
-            let is_no_account = matches!(err, CodexError::NoAvailableAccount);
-            let err_text = err.to_string();
-            add_failed_log(
-                logger.clone(),
-                storage.clone(),
-                &request_model,
-                &request_format,
-                err_text.clone(),
-            )
-            .await;
-
-            let rejection = if is_no_account {
-                CodexRejection::NoAvailableAccount
-            } else {
-                CodexRejection::ExecutionError(err_text)
-            };
-            return Err(warp::reject::custom(rejection));
+    // 用缓存移除已知的不支持参数
+    if is_responses {
+        if let Some(stripped) = state.codex_unsupported_params.strip_known_params(&body).await {
+            body = stripped;
         }
-    };
-
-    let upstream_status =
-        StatusCode::from_u16(upstream_response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let upstream_headers = upstream_response.headers().clone();
-
-    // 如果是 402/403，异步更新数据库中的 forbidden 状态
-    if upstream_status == StatusCode::PAYMENT_REQUIRED || upstream_status == StatusCode::FORBIDDEN {
-        let state_clone = state.clone();
-        let account_id = meta.account_id.clone();
-        tokio::spawn(async move {
-            mark_account_forbidden(&state_clone, &account_id).await;
-        });
     }
 
-    if is_event_stream(&upstream_headers) {
-        // 客户端原本不要流式 → 收集 SSE 流，提取最终响应对象以 JSON 返回
-        if stream_forced {
-            let response = destream_responses_sse(
+    // 最多重试 MAX_UNSUPPORTED_PARAM_RETRIES 次以处理未知的不支持参数
+    const MAX_UNSUPPORTED_PARAM_RETRIES: usize = 5;
+    let mut retries = 0;
+
+    loop {
+        let forward_request = ForwardRequest {
+            method: method.clone(),
+            path: path.clone(),
+            query: query.clone(),
+            headers: headers.clone(),
+            body: body.clone(),
+            format: request_format.clone(),
+            model: request_model.clone(),
+        };
+
+        let (upstream_response, meta) = match executor.forward(forward_request).await {
+            Ok(ok) => ok,
+            Err(err) => {
+                let is_no_account = matches!(err, CodexError::NoAvailableAccount);
+                let err_text = err.to_string();
+                add_failed_log(
+                    logger.clone(),
+                    storage.clone(),
+                    &request_model,
+                    &request_format,
+                    err_text.clone(),
+                )
+                .await;
+
+                let rejection = if is_no_account {
+                    CodexRejection::NoAvailableAccount
+                } else {
+                    CodexRejection::ExecutionError(err_text)
+                };
+                return Err(warp::reject::custom(rejection));
+            }
+        };
+
+        let upstream_status =
+            StatusCode::from_u16(upstream_response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let upstream_headers = upstream_response.headers().clone();
+
+        // 如果是 402/403，异步更新数据库中的 forbidden 状态
+        if upstream_status == StatusCode::PAYMENT_REQUIRED || upstream_status == StatusCode::FORBIDDEN {
+            let state_clone = state.clone();
+            let account_id = meta.account_id.clone();
+            tokio::spawn(async move {
+                mark_account_forbidden(&state_clone, &account_id).await;
+            });
+        }
+
+        // 对于非流式响应，检查是否包含 "Unsupported parameter" 错误并自动重试
+        if is_responses && retries < MAX_UNSUPPORTED_PARAM_RETRIES && !is_event_stream(&upstream_headers) {
+            let peek_bytes = match upstream_response.bytes().await {
+                Ok(b) => b,
+                Err(err) => {
+                    pool.record_failure(&meta.account_id, None).await;
+                    let err_text = format!("Failed to read upstream response body: {}", err);
+                    add_failed_log(logger, storage, &request_model, &request_format, err_text.clone()).await;
+                    return Err(warp::reject::custom(CodexRejection::ExecutionError(err_text)));
+                }
+            };
+
+            if let Some(param) = extract_unsupported_param(&peek_bytes) {
+                println!(
+                    "[Codex] Upstream rejected unsupported param '{}', stripping and retrying ({}/{})",
+                    param,
+                    retries + 1,
+                    MAX_UNSUPPORTED_PARAM_RETRIES
+                );
+                state.codex_unsupported_params.add(param.clone()).await;
+                body = remove_json_key(&body, &param);
+                retries += 1;
+                continue;
+            }
+
+            // 不是不支持参数的错误，正常返回
+            let usage = extract_usage_from_json_bytes(&peek_bytes);
+            if upstream_status.is_success() && usage.total_tokens > 0 {
+                pool.record_usage(&meta.account_id, usage.total_tokens).await;
+            }
+
+            let log_model = if request_model == "unknown" {
+                extract_model_from_json_bytes(&peek_bytes).unwrap_or(request_model)
+            } else {
+                request_model
+            };
+            let error_message = if upstream_status.is_success() {
+                None
+            } else {
+                extract_error_message(&peek_bytes)
+            };
+            let log = build_request_log(
+                &meta,
+                log_model,
+                if upstream_status.is_success() { "success" } else { "error" },
+                usage,
+                error_message,
+            );
+            record_log(logger, storage, log).await;
+
+            let response = build_buffered_response(upstream_status, &upstream_headers, peek_bytes)
+                .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
+            return Ok(Box::new(response) as Box<dyn Reply>);
+        }
+
+        // 流式响应或非 responses 格式
+        if is_event_stream(&upstream_headers) {
+            if stream_forced {
+                let response = destream_responses_sse(
+                    upstream_status,
+                    upstream_response,
+                    pool,
+                    logger,
+                    storage,
+                    meta,
+                    request_model,
+                )
+                .await
+                .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e)))?;
+                return Ok(Box::new(response) as Box<dyn Reply>);
+            }
+
+            let response = build_streaming_response_with_metrics(
                 upstream_status,
+                &upstream_headers,
                 upstream_response,
                 pool,
                 logger,
@@ -189,74 +371,48 @@ async fn handle_passthrough(
                 meta,
                 request_model,
             )
-            .await
-            .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e)))?;
+            .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
             return Ok(Box::new(response) as Box<dyn Reply>);
         }
 
-        let response = build_streaming_response_with_metrics(
-            upstream_status,
-            &upstream_headers,
-            upstream_response,
-            pool,
-            logger,
-            storage,
-            meta,
-            request_model,
-        )
-        .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
+        let upstream_bytes = match upstream_response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                pool.record_failure(&meta.account_id, None).await;
+                let err_text = format!("Failed to read upstream response body: {}", err);
+                add_failed_log(logger, storage, &request_model, &request_format, err_text.clone()).await;
+                return Err(warp::reject::custom(CodexRejection::ExecutionError(err_text)));
+            }
+        };
+
+        let usage = extract_usage_from_json_bytes(&upstream_bytes);
+        if upstream_status.is_success() && usage.total_tokens > 0 {
+            pool.record_usage(&meta.account_id, usage.total_tokens).await;
+        }
+
+        let log_model = if request_model == "unknown" {
+            extract_model_from_json_bytes(&upstream_bytes).unwrap_or(request_model)
+        } else {
+            request_model
+        };
+        let error_message = if upstream_status.is_success() {
+            None
+        } else {
+            extract_error_message(&upstream_bytes)
+        };
+        let log = build_request_log(
+            &meta,
+            log_model,
+            if upstream_status.is_success() { "success" } else { "error" },
+            usage,
+            error_message,
+        );
+        record_log(logger, storage, log).await;
+
+        let response = build_buffered_response(upstream_status, &upstream_headers, upstream_bytes)
+            .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
         return Ok(Box::new(response) as Box<dyn Reply>);
     }
-
-    let upstream_bytes = match upstream_response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            pool.record_failure(&meta.account_id, None).await;
-            let err_text = format!("Failed to read upstream response body: {}", err);
-            add_failed_log(
-                logger,
-                storage,
-                &request_model,
-                &request_format,
-                err_text.clone(),
-            )
-            .await;
-            return Err(warp::reject::custom(CodexRejection::ExecutionError(err_text)));
-        }
-    };
-
-    let usage = extract_usage_from_json_bytes(&upstream_bytes);
-    if upstream_status.is_success() && usage.total_tokens > 0 {
-        pool.record_usage(&meta.account_id, usage.total_tokens).await;
-    }
-
-    let log_model = if request_model == "unknown" {
-        extract_model_from_json_bytes(&upstream_bytes).unwrap_or(request_model)
-    } else {
-        request_model
-    };
-    let error_message = if upstream_status.is_success() {
-        None
-    } else {
-        extract_error_message(&upstream_bytes)
-    };
-    let log = build_request_log(
-        &meta,
-        log_model,
-        if upstream_status.is_success() {
-            "success"
-        } else {
-            "error"
-        },
-        usage,
-        error_message,
-    );
-    record_log(logger, storage, log).await;
-
-    let response = build_buffered_response(upstream_status, &upstream_headers, upstream_bytes)
-        .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
-
-    Ok(Box::new(response) as Box<dyn Reply>)
 }
 
 /// 收集上游 SSE 流，提取 response.completed 事件中的完整响应对象，
@@ -659,7 +815,6 @@ struct NormalizeResult {
 /// 规范化 Responses API 请求体，使其兼容 ChatGPT Codex 后端：
 /// - 将字符串 `input` 转换为消息对象数组
 /// - 补充缺失的 `instructions` 字段
-/// - 移除不支持的参数
 /// - 强制 `stream: true`
 fn normalize_responses_body(body: &Bytes) -> NormalizeResult {
     let Some(mut root) = serde_json::from_slice::<Value>(body).ok() else {
@@ -695,14 +850,6 @@ fn normalize_responses_body(body: &Bytes) -> NormalizeResult {
         modified = true;
     }
 
-    // 移除 ChatGPT Codex 后端不支持的参数
-    const UNSUPPORTED_PARAMS: &[&str] = &["max_output_tokens"];
-    for key in UNSUPPORTED_PARAMS {
-        if obj.remove(*key).is_some() {
-            modified = true;
-        }
-    }
-
     // ChatGPT Codex 后端要求 stream 必须为 true
     match obj.get("stream") {
         Some(v) if v.as_bool() == Some(true) => {}
@@ -720,6 +867,37 @@ fn normalize_responses_body(body: &Bytes) -> NormalizeResult {
     };
 
     NormalizeResult { body: new_body, stream_forced }
+}
+
+/// 从上游错误响应中提取 "Unsupported parameter" 的参数名
+fn extract_unsupported_param(body: &Bytes) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    // 在整个响应文本中搜索 "Unsupported parameter:" 模式
+    // 上游错误格式可能是 JSON 也可能不是，直接做文本匹配更稳健
+    let prefix = "Unsupported parameter:";
+    let idx = text.find(prefix)?;
+    let rest = &text[idx + prefix.len()..];
+    // 取冒号后面的参数名，去掉引号和空格
+    let param: String = rest
+        .trim()
+        .trim_start_matches(|c: char| c == '\'' || c == '"' || c == '`')
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if param.is_empty() { None } else { Some(param) }
+}
+
+/// 从 JSON body 中移除指定的 key
+fn remove_json_key(body: &Bytes, key: &str) -> Bytes {
+    if let Ok(mut root) = serde_json::from_slice::<Value>(body) {
+        if let Some(obj) = root.as_object_mut() {
+            obj.remove(key);
+            if let Ok(new_body) = serde_json::to_vec(&root) {
+                return Bytes::from(new_body);
+            }
+        }
+    }
+    body.clone()
 }
 
 fn extract_model_from_json_bytes(body: &Bytes) -> Option<String> {

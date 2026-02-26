@@ -89,6 +89,7 @@ pub struct AppState {
     pub codex_executor: Arc<Mutex<Option<Arc<CodexExecutor>>>>,
     pub codex_logger: Arc<Mutex<Option<Arc<tokio::sync::RwLock<RequestLogger>>>>>,
     codex_server: Arc<Mutex<Option<CodexServer>>>,
+    pub codex_unsupported_params: Arc<crate::platforms::openai::codex::server::UnsupportedParamCache>,
     pub codex_server_config: Arc<Mutex<Option<CodexServerConfig>>>,
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
@@ -119,6 +120,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            let app_data_dir = app.handle().path().app_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let app_state = AppState {
                 augment_oauth_state: Mutex::new(None),
                 openai_oauth_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -138,6 +141,9 @@ pub fn run() {
                 codex_executor: Arc::new(Mutex::new(None)),
                 codex_logger: Arc::new(Mutex::new(None)),
                 codex_server: Arc::new(Mutex::new(None)),
+                codex_unsupported_params: Arc::new(
+                    crate::platforms::openai::codex::server::UnsupportedParamCache::load(&app_data_dir),
+                ),
                 codex_server_config: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
@@ -380,6 +386,7 @@ pub fn run() {
                         codex_executor: state.codex_executor.clone(),
                         codex_logger: state.codex_logger.clone(),
                         codex_server: state.codex_server.clone(),
+                        codex_unsupported_params: state.codex_unsupported_params.clone(),
                         codex_server_config: state.codex_server_config.clone(),
                         codex_log_storage: state.codex_log_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
