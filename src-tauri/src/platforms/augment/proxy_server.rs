@@ -324,8 +324,13 @@ fn is_token_usable(token: &crate::storage::TokenData) -> bool {
 }
 
 fn is_banned(token: &crate::storage::TokenData) -> bool {
-    let status = token.ban_status.as_ref().and_then(|ban| ban.as_str());
-    matches!(status, Some("SUSPENDED" | "INVALID_TOKEN"))
+    let Some(status) = token.ban_status.as_ref().and_then(|ban| ban.as_str()) else {
+        return false;
+    };
+
+    let status = status.trim().to_ascii_uppercase();
+    matches!(status.as_str(), "SUSPENDED" | "INVALID_TOKEN" | "BANNED")
+        || status.starts_with("BANNED-")
 }
 
 fn has_available_credits(token: &crate::storage::TokenData) -> bool {
@@ -483,6 +488,22 @@ mod tests {
     fn invalid_token_status_is_not_usable() {
         let mut token = sample_token();
         token.ban_status = Some(json!("INVALID_TOKEN"));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn banned_token_is_not_usable() {
+        let mut token = sample_token();
+        token.ban_status = Some(json!("BANNED"));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn banned_token_with_reason_is_not_usable() {
+        let mut token = sample_token();
+        token.ban_status = Some(json!("BANNED-fraud"));
 
         assert!(!is_token_usable(&token));
     }
