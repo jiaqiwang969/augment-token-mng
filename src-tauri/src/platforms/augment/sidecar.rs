@@ -7,6 +7,12 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
+use url::Url;
+
+const AUGGIE_PROVIDER: &str = "auggie";
+const AUGGIE_CLIENT_ID: &str = "auggie-cli";
+const AUGGIE_LOGIN_MODE: &str = "localhost";
+const AUGGIE_DEFAULT_SCOPE: &str = "email";
 
 /// CLIProxyAPI sidecar 管理器
 pub struct AugmentSidecar {
@@ -120,31 +126,12 @@ impl AugmentSidecar {
 
         // 写入新的 auth 文件
         for token in tokens {
-            if token.access_token.is_empty() || token.tenant_url.is_empty() {
+            let Ok((filename, auth)) = build_auth_file(token) else {
                 continue;
-            }
-
-            let tenant = token.tenant_url.trim_end_matches('/');
-            let label = tenant
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .replace('/', "");
-            let filename = format!("auggie-{}.json", label.replace('.', "-"));
-
-            let auth = json!({
-                "access_token": token.access_token,
-                "client_id": "auggie-cli",
-                "disabled": false,
-                "label": label,
-                "last_refresh": token.updated_at.to_rfc3339(),
-                "login_mode": "localhost",
-                "scopes": ["read", "write"],
-                "tenant_url": format!("{}/", tenant),
-                "type": "auggie"
-            });
+            };
 
             let path = self.auth_dir.join(&filename);
-            std::fs::write(&path, serde_json::to_string(&auth).unwrap_or_default())
+            std::fs::write(&path, auth)
                 .map_err(|e| format!("Failed to write auth file {}: {}", filename, e))?;
         }
 
@@ -176,29 +163,7 @@ impl AugmentSidecar {
     }
 
     fn write_config(&self) -> Result<(), String> {
-        let config = format!(
-            r#"host: "127.0.0.1"
-port: {}
-auth-dir: "{}"
-api-keys:
-  - "{}"
-client-api-keys:
-  - key: "{}"
-    enabled: true
-    scope:
-      provider: auggie
-routing-strategy: round-robin
-debug: false
-request-log: false
-remote-management:
-  allow-remote: false
-  disable-control-panel: true
-"#,
-            self.port,
-            self.auth_dir.display(),
-            self.api_key,
-            self.api_key,
-        );
+        let config = build_config_yaml(self.port, &self.auth_dir, &self.api_key);
 
         std::fs::write(&self.config_path, config)
             .map_err(|e| format!("Failed to write config: {}", e))
@@ -252,4 +217,166 @@ fn find_available_port() -> Result<u16, std::io::Error> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+fn build_config_yaml(port: u16, auth_dir: &std::path::Path, api_key: &str) -> String {
+    format!(
+        r#"host: "127.0.0.1"
+port: {}
+auth-dir: "{}"
+api-keys:
+  - "{}"
+client-api-keys:
+  - key: "{}"
+    enabled: true
+    scope:
+      provider: auggie
+routing:
+  strategy: round-robin
+debug: false
+request-log: false
+remote-management:
+  allow-remote: false
+  disable-control-panel: true
+"#,
+        port,
+        auth_dir.display(),
+        api_key,
+        api_key,
+    )
+}
+
+fn build_auth_file(token: &TokenData) -> Result<(String, String), String> {
+    if token.access_token.trim().is_empty() {
+        return Err("Missing access_token".to_string());
+    }
+
+    let tenant_url = normalized_tenant_url(&token.tenant_url)
+        .ok_or_else(|| "Missing tenant_url".to_string())?;
+    let label =
+        auth_label_for_tenant(&tenant_url).ok_or_else(|| "Invalid tenant_url".to_string())?;
+    let filename = auth_filename_for_tenant(&tenant_url)
+        .ok_or_else(|| "Invalid tenant_url".to_string())?;
+    let auth = json!({
+        "type": AUGGIE_PROVIDER,
+        "label": label,
+        "access_token": token.access_token,
+        "tenant_url": tenant_url,
+        "scopes": [AUGGIE_DEFAULT_SCOPE],
+        "client_id": AUGGIE_CLIENT_ID,
+        "login_mode": AUGGIE_LOGIN_MODE,
+        "last_refresh": token.updated_at.to_rfc3339()
+    });
+    let raw = serde_json::to_string(&auth)
+        .map_err(|e| format!("Failed to serialize auth file: {}", e))?;
+
+    Ok((filename, raw))
+}
+
+fn auth_filename_for_tenant(tenant_url: &str) -> Option<String> {
+    let label = auth_label_for_tenant(tenant_url)?;
+    Some(format!("auggie-{}.json", label.replace('.', "-")))
+}
+
+fn auth_label_for_tenant(tenant_url: &str) -> Option<String> {
+    let parsed = parse_tenant_url(tenant_url)?;
+    parsed.host_str().map(|host| host.to_ascii_lowercase())
+}
+
+fn normalized_tenant_url(tenant_url: &str) -> Option<String> {
+    let parsed = parse_tenant_url(tenant_url)?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let authority = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+
+    Some(format!("{}://{authority}/", parsed.scheme()))
+}
+
+fn parse_tenant_url(tenant_url: &str) -> Option<Url> {
+    let trimmed = tenant_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Url::parse(trimmed)
+        .ok()
+        .or_else(|| Url::parse(&format!("https://{trimmed}")).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use serde_json::{Value, json};
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn sample_token(tenant_url: &str, access_token: &str) -> TokenData {
+        let updated_at = Utc.with_ymd_and_hms(2026, 3, 13, 1, 2, 3).unwrap();
+
+        TokenData {
+            id: "token-1".to_string(),
+            tenant_url: tenant_url.to_string(),
+            access_token: access_token.to_string(),
+            created_at: updated_at,
+            updated_at,
+            portal_url: None,
+            email_note: None,
+            tag_name: None,
+            tag_color: None,
+            ban_status: None,
+            portal_info: None,
+            auth_session: None,
+            suspensions: None,
+            balance_color_mode: None,
+            skip_check: None,
+            session_updated_at: None,
+            version: 0,
+        }
+    }
+
+    #[test]
+    fn sidecar_config_yaml_matches_cliproxy_contract() {
+        let temp_dir = tempdir().unwrap();
+        let mut sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+        sidecar.port = 43123;
+
+        sidecar.write_config().unwrap();
+
+        let yaml = fs::read_to_string(&sidecar.config_path).unwrap();
+        assert!(yaml.contains("host: \"127.0.0.1\""));
+        assert!(yaml.contains("port: 43123"));
+        assert!(yaml.contains(&format!("auth-dir: \"{}\"", sidecar.auth_dir.display())));
+        assert!(yaml.contains("api-keys:"));
+        assert!(yaml.contains(&format!("  - \"{}\"", sidecar.api_key())));
+        assert!(yaml.contains("debug: false"));
+        assert!(yaml.contains("request-log: false"));
+        assert!(yaml.contains("routing:"));
+        assert!(yaml.contains("strategy: round-robin"));
+        assert!(!yaml.contains("routing-strategy:"));
+    }
+
+    #[test]
+    fn sidecar_auth_json_matches_auggie_metadata_contract() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+        let token = sample_token("https://tenant.augmentcode.com/", "token-1");
+
+        sidecar.sync_accounts(&[token]).unwrap();
+
+        let auth_path = sidecar.auth_dir.join("auggie-tenant-augmentcode-com.json");
+        let raw = fs::read_to_string(auth_path).unwrap();
+        let json: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(json["type"], "auggie");
+        assert_eq!(json["label"], "tenant.augmentcode.com");
+        assert_eq!(json["access_token"], "token-1");
+        assert_eq!(json["tenant_url"], "https://tenant.augmentcode.com/");
+        assert_eq!(json["client_id"], "auggie-cli");
+        assert_eq!(json["login_mode"], "localhost");
+        assert_eq!(json["last_refresh"], "2026-03-13T01:02:03+00:00");
+        assert_eq!(json["scopes"], json!(["email"]));
+    }
 }
