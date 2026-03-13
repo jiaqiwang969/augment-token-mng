@@ -187,7 +187,7 @@ pub async fn stop_api_server(
     }
 }
 
-async fn stop_managed_augment_sidecar(
+pub(crate) async fn stop_managed_augment_sidecar(
     managed_sidecar: &tokio::sync::Mutex<Option<crate::platforms::augment::sidecar::AugmentSidecar>>,
 ) {
     let sidecar = {

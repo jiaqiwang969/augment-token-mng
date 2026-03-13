@@ -129,6 +129,8 @@ fn resolve_augment_sidecar_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platforms::augment::sidecar::AugmentSidecar;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -183,6 +185,30 @@ mod tests {
         let resolved = resolve_augment_sidecar_binary(None, manifest_dir.path(), &tmp_binary);
 
         assert_eq!(resolved.as_deref(), Some(tmp_binary.as_path()));
+    }
+
+    #[tokio::test]
+    async fn cleanup_managed_sidecar_on_shutdown_trigger_removes_runtime_artifacts() {
+        let temp_dir = tempdir().unwrap();
+        let managed_sidecar = Arc::new(tokio::sync::Mutex::new(Some(AugmentSidecar::new(
+            temp_dir.path(),
+            PathBuf::from("/tmp/cliproxy-server"),
+        ))));
+
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_auths")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_home")).unwrap();
+        std::fs::write(temp_dir.path().join("cliproxy_config.yaml"), b"port: 12345").unwrap();
+        std::fs::write(temp_dir.path().join("cliproxy_runtime.json"), b"{}").unwrap();
+
+        cleanup_managed_sidecar_on_shutdown(managed_sidecar.clone(), async {}).await;
+
+        assert!(!temp_dir.path().join("cliproxy_auths").exists());
+        assert!(!temp_dir.path().join("cliproxy_home").exists());
+        assert!(!temp_dir.path().join("cliproxy_config.yaml").exists());
+        assert!(!temp_dir.path().join("cliproxy_runtime.json").exists());
+
+        let guard = managed_sidecar.lock().await;
+        assert!(guard.as_ref().is_some(), "sidecar manager should stay registered");
     }
 }
 
@@ -258,6 +284,7 @@ pub fn run() {
             };
 
             app.manage(app_state);
+            install_termination_cleanup(&app.handle());
 
             // 初始化托盘状态管理器
             app.manage(TrayState::new());
@@ -885,4 +912,47 @@ pub fn run() {
                 );
             }
         });
+}
+
+async fn cleanup_managed_sidecar_on_shutdown<F>(
+    managed_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
+    shutdown_signal: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    shutdown_signal.await;
+    crate::core::api_server::stop_managed_augment_sidecar(&managed_sidecar).await;
+}
+
+#[cfg(unix)]
+async fn wait_for_termination_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(err) => {
+                eprintln!("Failed to register SIGTERM handler, falling back to Ctrl+C: {}", err);
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_termination_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn install_termination_cleanup(app: &tauri::AppHandle) {
+    let managed_sidecar = app.state::<AppState>().augment_sidecar.clone();
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        cleanup_managed_sidecar_on_shutdown(managed_sidecar, wait_for_termination_signal()).await;
+        app_handle.exit(0);
+    });
 }
