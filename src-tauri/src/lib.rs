@@ -101,6 +101,91 @@ pub struct AppState {
     pub augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
 }
 
+fn resolve_augment_sidecar_binary(
+    resource_dir: Option<&std::path::Path>,
+    manifest_dir: &std::path::Path,
+    fallback_binary: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    resource_dir
+        .map(|dir| dir.join("cliproxy-server"))
+        .filter(|path| path.exists())
+        .or_else(|| {
+            let dev_path = manifest_dir.join("resources").join("cliproxy-server");
+            if dev_path.exists() {
+                Some(dev_path)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if fallback_binary.exists() {
+                Some(fallback_binary.to_path_buf())
+            } else {
+                None
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_augment_sidecar_binary_prefers_bundled_resource_dir() {
+        let resource_dir = tempdir().unwrap();
+        let manifest_dir = tempdir().unwrap();
+        let tmp_dir = tempdir().unwrap();
+
+        let bundled_binary = resource_dir.path().join("cliproxy-server");
+        std::fs::write(&bundled_binary, b"bundled").unwrap();
+        std::fs::create_dir_all(manifest_dir.path().join("resources")).unwrap();
+        std::fs::write(
+            manifest_dir.path().join("resources").join("cliproxy-server"),
+            b"dev",
+        )
+        .unwrap();
+        std::fs::write(tmp_dir.path().join("cliproxy-server"), b"tmp").unwrap();
+
+        let resolved = resolve_augment_sidecar_binary(
+            Some(resource_dir.path()),
+            manifest_dir.path(),
+            &tmp_dir.path().join("cliproxy-server"),
+        );
+
+        assert_eq!(resolved.as_deref(), Some(bundled_binary.as_path()));
+    }
+
+    #[test]
+    fn resolve_augment_sidecar_binary_falls_back_to_dev_resources() {
+        let manifest_dir = tempdir().unwrap();
+        let tmp_dir = tempdir().unwrap();
+        let dev_binary = manifest_dir.path().join("resources").join("cliproxy-server");
+        std::fs::create_dir_all(dev_binary.parent().unwrap()).unwrap();
+        std::fs::write(&dev_binary, b"dev").unwrap();
+
+        let resolved = resolve_augment_sidecar_binary(
+            None,
+            manifest_dir.path(),
+            &tmp_dir.path().join("cliproxy-server"),
+        );
+
+        assert_eq!(resolved.as_deref(), Some(dev_binary.as_path()));
+    }
+
+    #[test]
+    fn resolve_augment_sidecar_binary_falls_back_to_tmp_binary() {
+        let manifest_dir = tempdir().unwrap();
+        let tmp_dir = tempdir().unwrap();
+        let tmp_binary = tmp_dir.path().join("cliproxy-server");
+        std::fs::write(&tmp_binary, b"tmp").unwrap();
+
+        let resolved = resolve_augment_sidecar_binary(None, manifest_dir.path(), &tmp_binary);
+
+        assert_eq!(resolved.as_deref(), Some(tmp_binary.as_path()));
+    }
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -160,22 +245,14 @@ pub fn run() {
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
                 augment_sidecar: Arc::new(tokio::sync::Mutex::new({
-                    // 查找 cliproxy-server 二进制：优先 resources 目录，其次 PATH
-                    let binary = app_data_dir.parent()
-                        .map(|p| p.join("resources").join("cliproxy-server"))
-                        .filter(|p| p.exists())
-                        .or_else(|| {
-                            // 开发模式：尝试 src-tauri/resources/
-                            let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                                .join("resources")
-                                .join("cliproxy-server");
-                            if dev_path.exists() { Some(dev_path) } else { None }
-                        })
-                        .or_else(|| {
-                            // fallback: /tmp/cliproxy-server
-                            let tmp = std::path::PathBuf::from("/tmp/cliproxy-server");
-                            if tmp.exists() { Some(tmp) } else { None }
-                        });
+                    // 查找 cliproxy-server 二进制：优先 bundle resources，其次开发态 resources，最后 /tmp fallback
+                    let fallback_binary = std::path::PathBuf::from("/tmp/cliproxy-server");
+                    let resource_dir = app.handle().path().resource_dir().ok();
+                    let binary = resolve_augment_sidecar_binary(
+                        resource_dir.as_deref(),
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                        &fallback_binary,
+                    );
                     binary.map(|b| AugmentSidecar::new(&app_data_dir, b))
                 })),
             };
