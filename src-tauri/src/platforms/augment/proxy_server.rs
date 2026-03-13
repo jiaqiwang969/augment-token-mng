@@ -62,9 +62,10 @@ fn should_forward_request_header(name: &str) -> bool {
 }
 
 fn is_supported_augment_path(path: &str) -> bool {
-    path.starts_with("/augment/v1/models")
-        || path.starts_with("/augment/v1/responses")
-        || path.starts_with("/augment/v1/chat/completions")
+    matches!(
+        path,
+        "/augment/v1/models" | "/augment/v1/responses" | "/augment/v1/chat/completions"
+    )
 }
 
 async fn handle_augment_proxy(
@@ -78,11 +79,9 @@ async fn handle_augment_proxy(
     // 从 /augment/v1/responses 提取 /v1/responses
     let raw_path = full_path.as_str();
 
-    // 验证路径是否支持
+    // 只暴露约定的 OpenAI 兼容入口，避免把任意 /augment/* 都透传到 sidecar
     if !is_supported_augment_path(raw_path) {
-        return Err(warp::reject::custom(AugmentProxyRejection::UpstreamError(
-            format!("Unsupported Augment path: {}", raw_path),
-        )));
+        return Err(warp::reject::not_found());
     }
 
     let inner_path = inner_path(raw_path);
@@ -377,5 +376,14 @@ mod tests {
         assert!(is_supported_augment_path("/augment/v1/responses"));
         assert!(is_supported_augment_path("/augment/v1/chat/completions"));
         assert!(!is_supported_augment_path("/augment/v0/management"));
+    }
+
+    #[test]
+    fn supported_augment_paths_must_match_exact_endpoints() {
+        assert!(!is_supported_augment_path("/augment/v1/models/extra"));
+        assert!(!is_supported_augment_path("/augment/v1/responses-debug"));
+        assert!(!is_supported_augment_path(
+            "/augment/v1/chat/completions/extra"
+        ));
     }
 }
