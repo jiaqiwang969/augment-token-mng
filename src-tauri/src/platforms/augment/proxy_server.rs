@@ -61,6 +61,12 @@ fn should_forward_request_header(name: &str) -> bool {
         && !name.eq_ignore_ascii_case("content-length")
 }
 
+fn is_supported_augment_path(path: &str) -> bool {
+    path.starts_with("/augment/v1/models")
+        || path.starts_with("/augment/v1/responses")
+        || path.starts_with("/augment/v1/chat/completions")
+}
+
 async fn handle_augment_proxy(
     full_path: FullPath,
     method: Method,
@@ -71,6 +77,14 @@ async fn handle_augment_proxy(
 ) -> Result<Box<dyn Reply>, Rejection> {
     // 从 /augment/v1/responses 提取 /v1/responses
     let raw_path = full_path.as_str();
+
+    // 验证路径是否支持
+    if !is_supported_augment_path(raw_path) {
+        return Err(warp::reject::custom(AugmentProxyRejection::UpstreamError(
+            format!("Unsupported Augment path: {}", raw_path),
+        )));
+    }
+
     let inner_path = inner_path(raw_path);
 
     println!(
@@ -355,5 +369,13 @@ mod tests {
         token.ban_status = Some(json!("ACTIVE"));
 
         assert!(is_token_usable(&token));
+    }
+
+    #[test]
+    fn supported_augment_paths_are_recognized() {
+        assert!(is_supported_augment_path("/augment/v1/models"));
+        assert!(is_supported_augment_path("/augment/v1/responses"));
+        assert!(is_supported_augment_path("/augment/v1/chat/completions"));
+        assert!(!is_supported_augment_path("/augment/v0/management"));
     }
 }
