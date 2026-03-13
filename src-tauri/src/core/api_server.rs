@@ -956,8 +956,10 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
 mod tests {
     use super::*;
     use crate::platforms::augment::sidecar::AugmentSidecar;
+    use serde_json::Value;
     use std::path::PathBuf;
     use tempfile::tempdir;
+    use warp::http::StatusCode;
 
     #[tokio::test]
     async fn stop_managed_augment_sidecar_keeps_manager_but_stops_runtime() {
@@ -988,5 +990,57 @@ mod tests {
         let sidecar = guard.as_ref().expect("sidecar manager should remain registered");
         assert!(!sidecar.is_running());
         assert!(sidecar.api_key().starts_with("sk-atm-internal-"));
+    }
+
+    #[tokio::test]
+    async fn handle_rejection_maps_augment_no_accounts_to_503() {
+        let route = warp::path!("augment" / "v1" / "models")
+            .and_then(|| async {
+                Err::<warp::reply::Response, Rejection>(warp::reject::custom(
+                    crate::platforms::augment::proxy_server::AugmentProxyRejection::NoAccounts(
+                        "No available Augment accounts".to_string(),
+                    ),
+                ))
+            })
+            .recover(handle_rejection);
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/augment/v1/models")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "no_augment_accounts");
+        assert_eq!(body["error"]["message"], "No available Augment accounts");
+        assert_eq!(body["error"]["code"], "503");
+    }
+
+    #[tokio::test]
+    async fn handle_rejection_maps_augment_upstream_error_to_502() {
+        let route = warp::path!("augment" / "v1" / "responses")
+            .and_then(|| async {
+                Err::<warp::reply::Response, Rejection>(warp::reject::custom(
+                    crate::platforms::augment::proxy_server::AugmentProxyRejection::UpstreamError(
+                        "Failed to forward to sidecar".to_string(),
+                    ),
+                ))
+            })
+            .recover(handle_rejection);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/augment/v1/responses")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "augment_upstream_error");
+        assert_eq!(body["error"]["message"], "Failed to forward to sidecar");
+        assert_eq!(body["error"]["code"], "502");
     }
 }
