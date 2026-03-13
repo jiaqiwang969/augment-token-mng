@@ -115,27 +115,79 @@ impl AugmentSidecar {
         std::fs::create_dir_all(&self.auth_dir)
             .map_err(|e| format!("Failed to create auth dir: {}", e))?;
 
-        // 清理旧文件
-        if let Ok(entries) = std::fs::read_dir(&self.auth_dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map_or(false, |e| e == "json") {
-                    let _ = std::fs::remove_file(entry.path());
+        let staging_dir = self.auth_dir.with_file_name(format!(
+            "{}.staging-{}",
+            self.auth_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("cliproxy_auths"),
+            uuid::Uuid::new_v4()
+        ));
+
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        std::fs::create_dir_all(&staging_dir)
+            .map_err(|e| format!("Failed to create staging auth dir: {}", e))?;
+
+        let result = (|| -> Result<(), String> {
+            let mut desired_files = std::collections::HashSet::new();
+
+            for token in tokens {
+                let Ok((filename, auth)) = build_auth_file(token) else {
+                    continue;
+                };
+
+                let staging_path = staging_dir.join(&filename);
+                std::fs::write(&staging_path, auth)
+                    .map_err(|e| format!("Failed to write auth file {}: {}", filename, e))?;
+                desired_files.insert(filename);
+            }
+
+            for filename in &desired_files {
+                let staging_path = staging_dir.join(filename);
+                let target_path = self.auth_dir.join(filename);
+
+                if target_path.is_dir() {
+                    return Err(format!(
+                        "Failed to write auth file {}: target path is a directory",
+                        filename
+                    ));
+                }
+
+                if target_path.exists() {
+                    std::fs::remove_file(&target_path)
+                        .map_err(|e| format!("Failed to write auth file {}: {}", filename, e))?;
+                }
+
+                std::fs::rename(&staging_path, &target_path)
+                    .map_err(|e| format!("Failed to write auth file {}: {}", filename, e))?;
+            }
+
+            if let Ok(entries) = std::fs::read_dir(&self.auth_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.extension().map_or(false, |e| e == "json") {
+                        continue;
+                    }
+
+                    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+
+                    if desired_files.contains(filename) {
+                        continue;
+                    }
+
+                    std::fs::remove_file(&path).map_err(|e| {
+                        format!("Failed to remove stale auth file {}: {}", filename, e)
+                    })?;
                 }
             }
-        }
 
-        // 写入新的 auth 文件
-        for token in tokens {
-            let Ok((filename, auth)) = build_auth_file(token) else {
-                continue;
-            };
+            Ok(())
+        })();
 
-            let path = self.auth_dir.join(&filename);
-            std::fs::write(&path, auth)
-                .map_err(|e| format!("Failed to write auth file {}: {}", filename, e))?;
-        }
-
-        Ok(())
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        result
     }
 
     /// 确保 sidecar 正在运行，如果没有则启动
@@ -220,14 +272,17 @@ fn find_available_port() -> Result<u16, std::io::Error> {
 }
 
 fn build_config_yaml(port: u16, auth_dir: &std::path::Path, api_key: &str) -> String {
+    let auth_dir = yaml_double_quoted(&auth_dir.display().to_string());
+    let api_key = yaml_double_quoted(api_key);
+
     format!(
         r#"host: "127.0.0.1"
 port: {}
-auth-dir: "{}"
+auth-dir: {}
 api-keys:
-  - "{}"
+  - {}
 client-api-keys:
-  - key: "{}"
+  - key: {}
     enabled: true
     scope:
       provider: auggie
@@ -240,7 +295,7 @@ remote-management:
   disable-control-panel: true
 "#,
         port,
-        auth_dir.display(),
+        auth_dir,
         api_key,
         api_key,
     )
@@ -305,12 +360,24 @@ fn parse_tenant_url(tenant_url: &str) -> Option<Url> {
         .or_else(|| Url::parse(&format!("https://{trimmed}")).ok())
 }
 
+fn yaml_double_quoted(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use serde_json::{Value, json};
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn sample_token(tenant_url: &str, access_token: &str) -> TokenData {
@@ -378,5 +445,35 @@ mod tests {
         assert_eq!(json["login_mode"], "localhost");
         assert_eq!(json["last_refresh"], "2026-03-13T01:02:03+00:00");
         assert_eq!(json["scopes"], json!(["email"]));
+    }
+
+    #[test]
+    fn sidecar_config_yaml_escapes_auth_dir_for_yaml() {
+        let yaml = build_config_yaml(
+            43123,
+            Path::new("C:\\Users\\me\\\"quoted\"\\ATM Data"),
+            "sk-test",
+        );
+
+        assert!(yaml.contains("auth-dir: \"C:\\\\Users\\\\me\\\\\\\"quoted\\\"\\\\ATM Data\""));
+    }
+
+    #[test]
+    fn sync_accounts_keeps_existing_auths_when_new_write_fails() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        fs::create_dir_all(&sidecar.auth_dir).unwrap();
+
+        let preserved_path = sidecar.auth_dir.join("auggie-existing.json");
+        fs::write(&preserved_path, r#"{"type":"auggie","label":"existing"}"#).unwrap();
+        fs::create_dir(sidecar.auth_dir.join("auggie-tenant-augmentcode-com.json")).unwrap();
+
+        let err = sidecar
+            .sync_accounts(&[sample_token("https://tenant.augmentcode.com/", "token-1")])
+            .unwrap_err();
+
+        assert!(err.contains("Failed to write auth file"));
+        assert!(preserved_path.exists());
     }
 }
