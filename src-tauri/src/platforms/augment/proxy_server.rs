@@ -3,11 +3,11 @@
 //! 将 /augment/v1/* 请求转发到 CLIProxyAPI sidecar，实现 Codex CLI → Augment 的透明代理。
 
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use hyper::{Body, Response};
 use std::sync::Arc;
 use warp::http::{HeaderMap, Method, StatusCode};
-use warp::path::FullPath;
 use warp::{Filter, Rejection, Reply};
 
 use crate::AppState;
@@ -19,16 +19,39 @@ pub fn augment_routes_from_state(
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let state_filter = warp::any().map(move || state.clone());
 
-    // 匹配 /augment/* 下的所有请求
-    warp::path("augment")
-        .and(warp::path::full())
-        .and(warp::method())
-        .and(optional_raw_query())
-        .and(warp::header::headers_cloned())
-        .and(warp::body::content_length_limit(20 * 1024 * 1024))
-        .and(warp::body::bytes())
+    let models_route = models_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy("/augment/v1/models", Method::GET, query, headers, body, state)
+        });
+
+    let responses_route = responses_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy(
+                "/augment/v1/responses",
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    let chat_completions_route = chat_completions_request_filter()
         .and(state_filter)
-        .and_then(handle_augment_proxy)
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy(
+                "/augment/v1/chat/completions",
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    models_route.or(responses_route).or(chat_completions_route)
 }
 
 fn optional_raw_query()
@@ -61,29 +84,48 @@ fn should_forward_request_header(name: &str) -> bool {
         && !name.eq_ignore_ascii_case("content-length")
 }
 
-fn is_supported_augment_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/augment/v1/models" | "/augment/v1/responses" | "/augment/v1/chat/completions"
-    )
+fn models_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path!("augment" / "v1" / "models")
+        .and(warp::get())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .map(|query, headers| (query, headers, Bytes::new()))
+        .untuple_one()
+}
+
+fn responses_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    proxy_post_request_filter(warp::path!("augment" / "v1" / "responses"))
+}
+
+fn chat_completions_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    proxy_post_request_filter(warp::path!("augment" / "v1" / "chat" / "completions"))
+}
+
+fn proxy_post_request_filter<F>(
+    path_filter: F,
+) -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone
+where
+    F: Filter<Extract = (), Error = Rejection> + Clone + Send + Sync + 'static,
+{
+    path_filter
+        .and(warp::post())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .and(warp::body::content_length_limit(20 * 1024 * 1024))
+        .and(warp::body::bytes())
 }
 
 async fn handle_augment_proxy(
-    full_path: FullPath,
+    raw_path: &'static str,
     method: Method,
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
     state: Arc<AppState>,
 ) -> Result<Box<dyn Reply>, Rejection> {
-    // 从 /augment/v1/responses 提取 /v1/responses
-    let raw_path = full_path.as_str();
-
-    // 只暴露约定的 OpenAI 兼容入口，避免把任意 /augment/* 都透传到 sidecar
-    if !is_supported_augment_path(raw_path) {
-        return Err(warp::reject::not_found());
-    }
-
     let inner_path = inner_path(raw_path);
 
     println!(
@@ -252,11 +294,60 @@ fn is_token_usable(token: &crate::storage::TokenData) -> bool {
     !token.access_token.trim().is_empty()
         && !token.tenant_url.trim().is_empty()
         && !is_banned(token)
+        && has_available_credits(token)
+        && !is_expired(token)
 }
 
 fn is_banned(token: &crate::storage::TokenData) -> bool {
     let status = token.ban_status.as_ref().and_then(|ban| ban.as_str());
     matches!(status, Some("SUSPENDED" | "INVALID_TOKEN"))
+}
+
+fn has_available_credits(token: &crate::storage::TokenData) -> bool {
+    let Some(balance) = token
+        .portal_info
+        .as_ref()
+        .and_then(|info| info.get("credits_balance"))
+    else {
+        return true;
+    };
+
+    parse_portal_number(balance).is_some_and(|balance| balance > 0.0)
+}
+
+fn is_expired(token: &crate::storage::TokenData) -> bool {
+    let Some(expiry_date) = token
+        .portal_info
+        .as_ref()
+        .and_then(|info| info.get("expiry_date"))
+        .and_then(|date| date.as_str())
+    else {
+        return false;
+    };
+
+    parse_portal_expiry(expiry_date)
+        .map(|expiry| expiry <= Utc::now())
+        .unwrap_or(false)
+}
+
+fn parse_portal_number(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|value| value as f64))
+        .or_else(|| value.as_u64().map(|value| value as f64))
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse::<f64>().ok()))
+}
+
+fn parse_portal_expiry(value: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|expiry| expiry.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|date| chrono::DateTime::<Utc>::from_naive_utc_and_offset(date, Utc))
+        })
 }
 
 // ==================== 错误类型 ====================
@@ -371,19 +462,197 @@ mod tests {
     }
 
     #[test]
-    fn supported_augment_paths_are_recognized() {
-        assert!(is_supported_augment_path("/augment/v1/models"));
-        assert!(is_supported_augment_path("/augment/v1/responses"));
-        assert!(is_supported_augment_path("/augment/v1/chat/completions"));
-        assert!(!is_supported_augment_path("/augment/v0/management"));
+    fn token_with_zero_credits_is_not_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 0,
+            "credit_total": 4000,
+            "expiry_date": "2026-04-05T00:00:00Z"
+        }));
+
+        assert!(!is_token_usable(&token));
     }
 
     #[test]
-    fn supported_augment_paths_must_match_exact_endpoints() {
-        assert!(!is_supported_augment_path("/augment/v1/models/extra"));
-        assert!(!is_supported_augment_path("/augment/v1/responses-debug"));
-        assert!(!is_supported_augment_path(
-            "/augment/v1/chat/completions/extra"
-        ));
+    fn token_with_positive_credits_is_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 4000,
+            "credit_total": 4000,
+            "expiry_date": "2026-04-05T00:00:00Z"
+        }));
+
+        assert!(is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_string_zero_credits_is_not_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": "0.00",
+            "credit_total": 4000,
+            "expiry_date": "2026-04-05T00:00:00Z"
+        }));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_string_positive_credits_is_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": "9.00",
+            "credit_total": 4000,
+            "expiry_date": "2026-04-05T00:00:00Z"
+        }));
+
+        assert!(is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_float_zero_credits_is_not_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 0.0,
+            "credit_total": 4000,
+            "expiry_date": "2026-04-05T00:00:00Z"
+        }));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_past_expiry_date_is_not_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 4000,
+            "credit_total": 4000,
+            "expiry_date": "2024-04-05T00:00:00Z"
+        }));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_date_only_past_expiry_date_is_not_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 4000,
+            "credit_total": 4000,
+            "expiry_date": "2024-04-05"
+        }));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_with_invalid_expiry_date_remains_usable() {
+        let mut token = sample_token();
+        token.portal_info = Some(json!({
+            "credits_balance": 4000,
+            "credit_total": 4000,
+            "expiry_date": "not-a-date"
+        }));
+
+        assert!(is_token_usable(&token));
+    }
+
+    #[test]
+    fn models_route_accepts_get_without_content_length() {
+        let route = models_request_filter().map(|query: Option<String>, _headers: HeaderMap, body: Bytes| {
+            assert_eq!(query, None);
+            assert!(body.is_empty());
+            warp::reply::with_status("ok", StatusCode::OK)
+        });
+
+        let response = futures::executor::block_on(async {
+            warp::test::request()
+                .method("GET")
+                .path("/augment/v1/models")
+                .reply(&route)
+                .await
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), "ok");
+    }
+
+    #[test]
+    fn models_route_preserves_query_string_without_requiring_body() {
+        let route = models_request_filter().map(|query: Option<String>, _headers: HeaderMap, body: Bytes| {
+            assert_eq!(query.as_deref(), Some("limit=20"));
+            assert!(body.is_empty());
+            warp::reply::with_status("ok", StatusCode::OK)
+        });
+
+        let response = futures::executor::block_on(async {
+            warp::test::request()
+                .method("GET")
+                .path("/augment/v1/models?limit=20")
+                .reply(&route)
+                .await
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn responses_route_requires_post() {
+        let route = responses_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+            warp::reply::with_status("ok", StatusCode::OK)
+        });
+
+        let response = futures::executor::block_on(async {
+            warp::test::request()
+                .method("GET")
+                .path("/augment/v1/responses")
+                .reply(&route)
+                .await
+        });
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn chat_completions_route_requires_post() {
+        let route = chat_completions_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+            warp::reply::with_status("ok", StatusCode::OK)
+        });
+
+        let response = futures::executor::block_on(async {
+            warp::test::request()
+                .method("GET")
+                .path("/augment/v1/chat/completions")
+                .reply(&route)
+                .await
+        });
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn augment_route_filters_do_not_match_management_path() {
+        let route = models_request_filter()
+            .map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                warp::reply::with_status("models", StatusCode::OK)
+            })
+            .or(responses_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                warp::reply::with_status("responses", StatusCode::OK)
+            }))
+            .unify()
+            .or(chat_completions_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                warp::reply::with_status("chat", StatusCode::OK)
+            }))
+            .unify();
+
+        let response = futures::executor::block_on(async {
+            warp::test::request()
+                .method("GET")
+                .path("/augment/v0/management")
+                .reply(&route)
+                .await
+        });
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
