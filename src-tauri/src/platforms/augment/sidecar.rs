@@ -3,9 +3,11 @@
 //! 管理 CLIProxyAPI Go 二进制的生命周期，负责启动、停止、健康检查和 auth 文件同步。
 
 use crate::storage::TokenData;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process::Stdio;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::process::{Child, Command};
 use url::Url;
 
@@ -14,6 +16,13 @@ const AUGGIE_CLIENT_ID: &str = "auggie-cli";
 const AUGGIE_LOGIN_MODE: &str = "localhost";
 const AUGGIE_DEFAULT_SCOPE: &str = "email";
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SidecarRuntimeMetadata {
+    pid: u32,
+    config_path: PathBuf,
+    binary_path: PathBuf,
+}
+
 /// CLIProxyAPI sidecar 管理器
 pub struct AugmentSidecar {
     port: u16,
@@ -21,6 +30,7 @@ pub struct AugmentSidecar {
     auth_dir: PathBuf,
     home_dir: PathBuf,
     config_path: PathBuf,
+    runtime_path: PathBuf,
     api_key: String,
     binary_path: PathBuf,
 }
@@ -31,6 +41,7 @@ impl AugmentSidecar {
         let auth_dir = app_data_dir.join("cliproxy_auths");
         let home_dir = app_data_dir.join("cliproxy_home");
         let config_path = app_data_dir.join("cliproxy_config.yaml");
+        let runtime_path = app_data_dir.join("cliproxy_runtime.json");
         let api_key = format!("sk-atm-internal-{}", uuid::Uuid::new_v4());
 
         Self {
@@ -39,6 +50,7 @@ impl AugmentSidecar {
             auth_dir,
             home_dir,
             config_path,
+            runtime_path,
             api_key,
             binary_path,
         }
@@ -59,11 +71,47 @@ impl AugmentSidecar {
         self.child.is_some()
     }
 
+    /// sidecar 是否健康可用
+    pub async fn is_healthy(&self) -> bool {
+        if self.port == 0 {
+            return false;
+        }
+
+        let url = format!("{}/v1/models", self.base_url());
+        let client = reqwest::Client::new();
+
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(body) => models_payload_is_ready(body.as_ref()),
+                Err(_) => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// 同步强制停止 sidecar，用于退出路径
+    pub fn force_stop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+        self.child = None;
+        self.port = 0;
+        self.cleanup_runtime_files();
+    }
+
     /// 启动 sidecar 进程
     pub async fn start(&mut self, tokens: &[TokenData]) -> Result<(), String> {
         if self.child.is_some() {
             return Ok(());
         }
+
+        self.reap_stale_managed_sidecar()?;
 
         // 找空闲端口
         self.port = find_available_port().map_err(|e| format!("Failed to find port: {}", e))?;
@@ -98,6 +146,7 @@ impl AugmentSidecar {
             .map_err(|e| format!("Failed to start cliproxy-server: {}", e))?;
 
         self.child = Some(child);
+        self.persist_runtime_metadata()?;
 
         // 等待健康检查
         self.wait_healthy(10).await?;
@@ -116,10 +165,8 @@ impl AugmentSidecar {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        // 清理临时文件
-        let _ = std::fs::remove_dir_all(&self.auth_dir);
-        let _ = std::fs::remove_dir_all(&self.home_dir);
-        let _ = std::fs::remove_file(&self.config_path);
+        self.port = 0;
+        self.cleanup_runtime_files();
         println!("[AugmentSidecar] Stopped");
     }
 
@@ -205,25 +252,32 @@ impl AugmentSidecar {
 
     /// 确保 sidecar 正在运行，如果没有则启动
     pub async fn ensure_running(&mut self, tokens: &[TokenData]) -> Result<(), String> {
-        // 检查子进程是否还活着
-        if let Some(ref mut child) = self.child {
+        let child_alive = if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(_)) => {
-                    // 进程已退出，清理
                     self.child = None;
+                    false
                 }
-                Ok(None) => {
-                    // 进程还在运行，同步账号
-                    self.sync_accounts(tokens)?;
-                    return Ok(());
-                }
+                Ok(None) => true,
                 Err(_) => {
                     self.child = None;
+                    false
                 }
             }
+        } else {
+            false
+        };
+
+        if child_alive {
+            self.sync_accounts(tokens)?;
+            if self.is_healthy().await {
+                return Ok(());
+            }
+
+            println!("[AugmentSidecar] Running sidecar is unhealthy, restarting");
+            self.stop().await;
         }
 
-        // 需要启动
         self.start(tokens).await
     }
 
@@ -235,34 +289,15 @@ impl AugmentSidecar {
     }
 
     async fn wait_healthy(&self, max_seconds: u64) -> Result<(), String> {
-        let url = format!("{}/v1/models", self.base_url());
-        let client = reqwest::Client::new();
-
         for i in 0..max_seconds * 2 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            match client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let ready = match resp.bytes().await {
-                        Ok(body) => models_payload_is_ready(body.as_ref()),
-                        Err(_) => false,
-                    };
-
-                    if ready {
-                        println!(
-                            "[AugmentSidecar] Health check passed after {}ms",
-                            (i + 1) * 500
-                        );
-                        return Ok(());
-                    }
-                }
-                _ => continue,
+            if self.is_healthy().await {
+                println!(
+                    "[AugmentSidecar] Health check passed after {}ms",
+                    (i + 1) * 500
+                );
+                return Ok(());
             }
         }
 
@@ -271,16 +306,116 @@ impl AugmentSidecar {
             max_seconds
         ))
     }
+
+    fn cleanup_runtime_files(&self) {
+        let _ = std::fs::remove_dir_all(&self.auth_dir);
+        let _ = std::fs::remove_dir_all(&self.home_dir);
+        let _ = std::fs::remove_file(&self.config_path);
+        let _ = std::fs::remove_file(&self.runtime_path);
+    }
+
+    fn persist_runtime_metadata(&self) -> Result<(), String> {
+        let Some(pid) = self.child.as_ref().and_then(|child| child.id()) else {
+            return Ok(());
+        };
+
+        let metadata = SidecarRuntimeMetadata {
+            pid,
+            config_path: self.config_path.clone(),
+            binary_path: self.binary_path.clone(),
+        };
+        let raw = serde_json::to_vec(&metadata)
+            .map_err(|e| format!("Failed to serialize sidecar metadata: {}", e))?;
+
+        std::fs::write(&self.runtime_path, raw)
+            .map_err(|e| format!("Failed to write sidecar metadata: {}", e))
+    }
+
+    fn load_runtime_metadata(&self) -> Result<Option<SidecarRuntimeMetadata>, String> {
+        match std::fs::read(&self.runtime_path) {
+            Ok(raw) => serde_json::from_slice(&raw)
+                .map(Some)
+                .map_err(|e| format!("Failed to parse sidecar metadata: {}", e)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(format!("Failed to read sidecar metadata: {}", err)),
+        }
+    }
+
+    fn reap_stale_managed_sidecar(&self) -> Result<(), String> {
+        let metadata = match self.load_runtime_metadata() {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => return Ok(()),
+            Err(err) => {
+                eprintln!(
+                    "[AugmentSidecar] Ignoring unreadable sidecar metadata at {}: {}",
+                    self.runtime_path.display(),
+                    err
+                );
+                let _ = std::fs::remove_file(&self.runtime_path);
+                return Ok(());
+            }
+        };
+
+        let mut system = System::new();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::new());
+
+        let pid = sysinfo::Pid::from_u32(metadata.pid);
+        let matched_process = system.process(pid).is_some_and(|process| {
+            let process_name = process.name().to_string_lossy().into_owned();
+            let exe_path = process.exe();
+            let cmd = process
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+
+            process_matches_runtime_metadata(&process_name, exe_path, &cmd, &metadata)
+        });
+
+        if matched_process {
+            println!(
+                "[AugmentSidecar] Reaping stale managed sidecar PID {}",
+                metadata.pid
+            );
+
+            let process = system
+                .process(pid)
+                .ok_or_else(|| "Stale sidecar process disappeared during cleanup".to_string())?;
+            if !process.kill() {
+                return Err(format!(
+                    "Failed to kill stale managed sidecar PID {}",
+                    metadata.pid
+                ));
+            }
+
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::new(),
+                );
+                if system.process(pid).is_none() {
+                    break;
+                }
+            }
+
+            if system.process(pid).is_some() {
+                return Err(format!(
+                    "Stale managed sidecar PID {} is still alive after kill",
+                    metadata.pid
+                ));
+            }
+        }
+
+        let _ = std::fs::remove_file(&self.runtime_path);
+        Ok(())
+    }
 }
 
 impl Drop for AugmentSidecar {
     fn drop(&mut self) {
-        if let Some(ref mut child) = self.child {
-            let _ = child.start_kill();
-        }
-        let _ = std::fs::remove_dir_all(&self.auth_dir);
-        let _ = std::fs::remove_dir_all(&self.home_dir);
-        let _ = std::fs::remove_file(&self.config_path);
+        self.force_stop();
     }
 }
 
@@ -432,14 +567,62 @@ fn models_payload_is_ready(body: &[u8]) -> bool {
         .is_some_and(|models| !models.is_empty())
 }
 
+fn process_matches_runtime_metadata(
+    process_name: &str,
+    exe_path: Option<&std::path::Path>,
+    cmd: &[String],
+    metadata: &SidecarRuntimeMetadata,
+) -> bool {
+    binary_identity_matches(process_name, exe_path, &metadata.binary_path)
+        && command_uses_config_path(cmd, &metadata.config_path)
+}
+
+fn binary_identity_matches(
+    process_name: &str,
+    exe_path: Option<&std::path::Path>,
+    binary_path: &std::path::Path,
+) -> bool {
+    let Some(binary_name) = binary_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    let process_name = process_name.to_ascii_lowercase();
+    let binary_name = binary_name.to_ascii_lowercase();
+    let name_matches = process_name == binary_name || process_name.contains(&binary_name);
+
+    let exe_matches = exe_path.is_some_and(|exe_path| exe_path == binary_path);
+
+    name_matches || exe_matches
+}
+
+fn command_uses_config_path(cmd: &[String], config_path: &std::path::Path) -> bool {
+    let expected = config_path.to_string_lossy();
+
+    cmd.windows(2).any(|window| {
+        window.first().is_some_and(|arg| arg == "-config")
+            && window
+                .get(1)
+                .is_some_and(|value| value == expected.as_ref())
+    }) || cmd.iter().any(|arg| {
+        arg.strip_prefix("-config=")
+            .is_some_and(|value| value == expected.as_ref())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use serde_json::{Value, json};
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::process::Stdio;
     use tempfile::tempdir;
+    #[cfg(unix)]
+    use tokio::process::Command;
 
     fn sample_token(tenant_url: &str, access_token: &str) -> TokenData {
         let updated_at = Utc.with_ymd_and_hms(2026, 3, 13, 1, 2, 3).unwrap();
@@ -604,5 +787,267 @@ mod tests {
 
         assert!(err.contains("Failed to write auth file"));
         assert!(preserved_path.exists());
+    }
+
+    #[test]
+    fn runtime_metadata_round_trips_through_json() {
+        let metadata = SidecarRuntimeMetadata {
+            pid: 43123,
+            config_path: PathBuf::from("/tmp/cliproxy_config.yaml"),
+            binary_path: PathBuf::from("/tmp/cliproxy-server"),
+        };
+
+        let raw = serde_json::to_string(&metadata).unwrap();
+        let restored: SidecarRuntimeMetadata = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(restored.pid, 43123);
+        assert_eq!(restored.config_path, PathBuf::from("/tmp/cliproxy_config.yaml"));
+        assert_eq!(restored.binary_path, PathBuf::from("/tmp/cliproxy-server"));
+    }
+
+    #[test]
+    fn stale_sidecar_process_requires_matching_config_path() {
+        let metadata = SidecarRuntimeMetadata {
+            pid: 7,
+            config_path: PathBuf::from("/tmp/cliproxy_config.yaml"),
+            binary_path: PathBuf::from("/tmp/cliproxy-server"),
+        };
+
+        assert!(!process_matches_runtime_metadata(
+            "cliproxy-server",
+            Some(Path::new("/tmp/cliproxy-server")),
+            &[
+                "/tmp/cliproxy-server".to_string(),
+                "-config".to_string(),
+                "/tmp/other.yaml".to_string(),
+            ],
+            &metadata,
+        ));
+    }
+
+    #[test]
+    fn stale_sidecar_process_requires_matching_binary_identity() {
+        let metadata = SidecarRuntimeMetadata {
+            pid: 7,
+            config_path: PathBuf::from("/tmp/cliproxy_config.yaml"),
+            binary_path: PathBuf::from("/tmp/cliproxy-server"),
+        };
+
+        assert!(!process_matches_runtime_metadata(
+            "python3",
+            Some(Path::new("/usr/bin/python3")),
+            &[
+                "python3".to_string(),
+                "-m".to_string(),
+                "http.server".to_string(),
+                "-config".to_string(),
+                "/tmp/cliproxy_config.yaml".to_string(),
+            ],
+            &metadata,
+        ));
+    }
+
+    #[test]
+    fn stale_sidecar_process_matches_expected_binary_and_config() {
+        let metadata = SidecarRuntimeMetadata {
+            pid: 7,
+            config_path: PathBuf::from("/tmp/cliproxy_config.yaml"),
+            binary_path: PathBuf::from("/tmp/cliproxy-server"),
+        };
+
+        assert!(process_matches_runtime_metadata(
+            "cliproxy-server",
+            Some(Path::new("/tmp/cliproxy-server")),
+            &[
+                "/tmp/cliproxy-server".to_string(),
+                "-config".to_string(),
+                "/tmp/cliproxy_config.yaml".to_string(),
+            ],
+            &metadata,
+        ));
+    }
+
+    #[test]
+    fn reap_stale_sidecar_ignores_invalid_runtime_metadata() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        fs::write(&sidecar.runtime_path, b"{not-json").unwrap();
+
+        sidecar.reap_stale_managed_sidecar().unwrap();
+
+        assert!(!sidecar.runtime_path.exists());
+    }
+
+    #[cfg(unix)]
+    fn write_fake_sidecar_binary(dir: &Path) -> PathBuf {
+        let binary_path = dir.join("fake-cliproxy-server.sh");
+        let script = r#"#!/bin/sh
+set -eu
+
+CONFIG=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-config" ]; then
+    CONFIG="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+
+PORT="$(awk '/^port:/ { print $2; exit }' "$CONFIG")"
+
+python3 - "$PORT" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/v1/models"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data":[{"id":"auggie-test"}]}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, fmt, *args):
+        return
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+"#;
+
+        fs::write(&binary_path, script).unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        binary_path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sidecar_stop_removes_runtime_artifacts_and_child() {
+        let temp_dir = tempdir().unwrap();
+        let mut sidecar =
+            AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        fs::create_dir_all(&sidecar.auth_dir).unwrap();
+        fs::create_dir_all(&sidecar.home_dir).unwrap();
+        fs::write(sidecar.auth_dir.join("auggie-test.json"), "{}").unwrap();
+        fs::write(&sidecar.config_path, "port: 12345").unwrap();
+
+        sidecar.child = Some(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        assert!(sidecar.is_running());
+
+        sidecar.stop().await;
+
+        assert!(!sidecar.is_running());
+        assert!(!sidecar.auth_dir.exists());
+        assert!(!sidecar.home_dir.exists());
+        assert!(!sidecar.config_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sidecar_force_stop_removes_runtime_artifacts_and_child() {
+        let temp_dir = tempdir().unwrap();
+        let mut sidecar =
+            AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        fs::create_dir_all(&sidecar.auth_dir).unwrap();
+        fs::create_dir_all(&sidecar.home_dir).unwrap();
+        fs::write(sidecar.auth_dir.join("auggie-test.json"), "{}").unwrap();
+        fs::write(&sidecar.config_path, "port: 12345").unwrap();
+
+        sidecar.child = Some(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        assert!(sidecar.is_running());
+
+        sidecar.force_stop();
+
+        assert!(!sidecar.is_running());
+        assert!(!sidecar.auth_dir.exists());
+        assert!(!sidecar.home_dir.exists());
+        assert!(!sidecar.config_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sidecar_force_stop_reaps_child_process_before_returning() {
+        let temp_dir = tempdir().unwrap();
+        let mut sidecar =
+            AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        sidecar.child = Some(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        let pid = sidecar.child.as_ref().and_then(|child| child.id()).unwrap();
+
+        sidecar.force_stop();
+
+        let mut system = System::new();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::new());
+
+        assert!(
+            system.process(sysinfo::Pid::from_u32(pid)).is_none(),
+            "sidecar child PID {} should be gone after force_stop",
+            pid
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_running_restarts_alive_but_unhealthy_child() {
+        let temp_dir = tempdir().unwrap();
+        let fake_binary = write_fake_sidecar_binary(temp_dir.path());
+        let mut sidecar = AugmentSidecar::new(temp_dir.path(), fake_binary);
+        let tokens = vec![sample_token("https://tenant.augmentcode.com/", "token-1")];
+
+        sidecar.port = find_available_port().unwrap();
+        let stale_port = sidecar.port;
+        sidecar.child = Some(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        sidecar.ensure_running(&tokens).await.unwrap();
+
+        assert_ne!(sidecar.port, stale_port);
+        assert!(sidecar.is_healthy().await);
+
+        sidecar.stop().await;
     }
 }

@@ -166,10 +166,14 @@ pub async fn stop_api_server(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut server_guard = state.api_server.lock().unwrap();
+    let server = {
+        let mut server_guard = state.api_server.lock().unwrap();
+        server_guard.take()
+    };
 
-    if let Some(mut server) = server_guard.take() {
+    if let Some(mut server) = server {
         server.shutdown();
+        stop_managed_augment_sidecar(&state.augment_sidecar).await;
         // 同步清除 Codex 服务器状态
         *state.codex_server.lock().unwrap() = None;
         println!("🛑 API Server stopped");
@@ -180,6 +184,30 @@ pub async fn stop_api_server(
         Ok(())
     } else {
         Err("API server is not running".to_string())
+    }
+}
+
+async fn stop_managed_augment_sidecar(
+    managed_sidecar: &tokio::sync::Mutex<Option<crate::platforms::augment::sidecar::AugmentSidecar>>,
+) {
+    let sidecar = {
+        let mut guard = managed_sidecar.lock().await;
+        guard.take()
+    };
+
+    if let Some(mut sidecar) = sidecar {
+        sidecar.stop().await;
+        let mut guard = managed_sidecar.lock().await;
+        *guard = Some(sidecar);
+    }
+}
+
+pub(crate) fn stop_managed_augment_sidecar_blocking(
+    managed_sidecar: &tokio::sync::Mutex<Option<crate::platforms::augment::sidecar::AugmentSidecar>>,
+) {
+    let mut guard = managed_sidecar.blocking_lock();
+    if let Some(sidecar) = guard.as_mut() {
+        sidecar.force_stop();
     }
 }
 
@@ -921,5 +949,44 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             warp::reply::json(&error_response),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platforms::augment::sidecar::AugmentSidecar;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn stop_managed_augment_sidecar_keeps_manager_but_stops_runtime() {
+        let temp_dir = tempdir().unwrap();
+        let managed_sidecar = tokio::sync::Mutex::new(Some(AugmentSidecar::new(
+            temp_dir.path(),
+            PathBuf::from("/tmp/cliproxy-server"),
+        )));
+
+        stop_managed_augment_sidecar(&managed_sidecar).await;
+
+        let guard = managed_sidecar.lock().await;
+        let sidecar = guard.as_ref().expect("sidecar manager should remain registered");
+        assert!(!sidecar.is_running());
+    }
+
+    #[test]
+    fn stop_managed_augment_sidecar_blocking_keeps_manager_registered() {
+        let temp_dir = tempdir().unwrap();
+        let managed_sidecar = tokio::sync::Mutex::new(Some(AugmentSidecar::new(
+            temp_dir.path(),
+            PathBuf::from("/tmp/cliproxy-server"),
+        )));
+
+        stop_managed_augment_sidecar_blocking(&managed_sidecar);
+
+        let guard = managed_sidecar.blocking_lock();
+        let sidecar = guard.as_ref().expect("sidecar manager should remain registered");
+        assert!(!sidecar.is_running());
+        assert!(sidecar.api_key().starts_with("sk-atm-internal-"));
     }
 }
