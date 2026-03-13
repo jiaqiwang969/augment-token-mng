@@ -11,11 +11,34 @@ use warp::http::{HeaderMap, Method, StatusCode};
 use warp::{Filter, Rejection, Reply};
 
 use crate::AppState;
+use crate::data::storage::augment::DualStorage;
 use crate::data::storage::augment::traits::TokenStorage;
+use crate::platforms::augment::sidecar::AugmentSidecar;
+
+#[derive(Clone)]
+struct AugmentProxyState {
+    storage_manager: Arc<std::sync::Mutex<Option<Arc<DualStorage>>>>,
+    augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
+}
+
+impl AugmentProxyState {
+    fn from_app_state(state: &Arc<AppState>) -> Self {
+        Self {
+            storage_manager: state.storage_manager.clone(),
+            augment_sidecar: state.augment_sidecar.clone(),
+        }
+    }
+}
 
 /// Augment 代理路由
 pub fn augment_routes_from_state(
     state: Arc<AppState>,
+) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+    augment_routes(AugmentProxyState::from_app_state(&state))
+}
+
+fn augment_routes(
+    state: AugmentProxyState,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let state_filter = warp::any().map(move || state.clone());
 
@@ -124,7 +147,7 @@ async fn handle_augment_proxy(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
-    state: Arc<AppState>,
+    state: AugmentProxyState,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let inner_path = inner_path(raw_path);
 
@@ -272,7 +295,9 @@ fn build_streaming_response(
     builder.body(body).map_err(|e| e.to_string())
 }
 
-async fn get_available_tokens(state: &AppState) -> Result<Vec<crate::storage::TokenData>, String> {
+async fn get_available_tokens(
+    state: &AugmentProxyState,
+) -> Result<Vec<crate::storage::TokenData>, String> {
     let storage = {
         let guard = state.storage_manager.lock().unwrap();
         guard
@@ -365,7 +390,16 @@ impl warp::reject::Reject for AugmentProxyRejection {}
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    use crate::data::storage::augment::{DualStorage, LocalFileStorage};
+    use crate::platforms::augment::sidecar::AugmentSidecar;
 
     fn sample_token() -> crate::storage::TokenData {
         let now = Utc.with_ymd_and_hms(2026, 3, 13, 1, 2, 3).unwrap();
@@ -654,5 +688,167 @@ mod tests {
         });
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(unix)]
+    fn write_fake_proxy_sidecar_binary(dir: &Path) -> PathBuf {
+        let binary_path = dir.join("fake-proxy-sidecar.sh");
+        let script = r#"#!/bin/sh
+set -eu
+
+CONFIG=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-config" ]; then
+    CONFIG="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+
+PORT="$(awk '/^port:/ { print $2; exit }' "$CONFIG")"
+
+python3 - "$PORT" <<'PY'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/v1/models"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data":[{"id":"auggie-test"}]}')
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length).decode("utf-8")
+
+        if self.path.startswith("/v1/chat/completions"):
+            payload = {
+                "authorization": self.headers.get("Authorization"),
+                "path": self.path,
+                "body": body,
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        if self.path.startswith("/v1/responses"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b'data: {"ok":true}\n\n')
+            self.wfile.flush()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, fmt, *args):
+        return
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+"#;
+
+        fs::write(&binary_path, script).unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        binary_path
+    }
+
+    #[cfg(unix)]
+    async fn build_proxy_test_state(temp_dir: &Path) -> AugmentProxyState {
+        let local_storage = Arc::new(LocalFileStorage::new_with_path(
+            temp_dir.join("proxy-test-tokens.json"),
+        ));
+        let storage_manager = Arc::new(DualStorage::new(local_storage, None));
+        storage_manager.save_token(&sample_token()).await.unwrap();
+
+        AugmentProxyState {
+            storage_manager: Arc::new(Mutex::new(Some(storage_manager))),
+            augment_sidecar: Arc::new(tokio::sync::Mutex::new(Some(AugmentSidecar::new(
+                temp_dir,
+                write_fake_proxy_sidecar_binary(temp_dir),
+            )))),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn augment_chat_route_lazily_starts_sidecar_and_replaces_authorization() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = augment_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/augment/v1/chat/completions?stream=false")
+            .header("authorization", "Bearer user-token")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}"#)
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(payload["path"], "/v1/chat/completions?stream=false");
+
+        let authorization = payload["authorization"].as_str().unwrap();
+        assert!(authorization.starts_with("Bearer sk-atm-internal-"));
+        assert_ne!(authorization, "Bearer user-token");
+        assert!(
+            payload["body"]
+                .as_str()
+                .unwrap()
+                .contains(r#""model":"gpt-5""#)
+        );
+
+        let mut guard = state.augment_sidecar.lock().await;
+        if let Some(sidecar) = guard.as_mut() {
+            sidecar.stop().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn augment_responses_route_preserves_sse_streams() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = augment_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/augment/v1/responses")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"gpt-5","input":"hi","stream":true}"#)
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/event-stream"
+        );
+        assert_eq!(response.body(), "data: {\"ok\":true}\n\n");
+
+        let mut guard = state.augment_sidecar.lock().await;
+        if let Some(sidecar) = guard.as_mut() {
+            sidecar.stop().await;
+        }
     }
 }

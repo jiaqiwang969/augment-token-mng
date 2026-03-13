@@ -57,7 +57,7 @@ use storage::{
     AntigravityDualStorage, ClaudeDualStorage, CursorDualStorage, DualStorage, OpenAIDualStorage,
     WindsurfDualStorage,
 };
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 // App Session 缓存结构 (公开以便其他模块使用)
@@ -875,6 +875,14 @@ pub fn run() {
             subscription_monitor::check_subscriptions_expiry,
             subscription_monitor::get_expiring_subscriptions
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                let state = app.state::<AppState>();
+                crate::core::api_server::stop_managed_augment_sidecar_blocking(
+                    &state.augment_sidecar,
+                );
+            }
+        });
 }
