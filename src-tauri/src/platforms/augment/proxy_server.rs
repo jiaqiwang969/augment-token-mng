@@ -39,6 +39,28 @@ fn optional_raw_query() -> impl Filter<Extract = (Option<String>,), Error = std:
         .unify()
 }
 
+fn inner_path(raw_path: &str) -> String {
+    raw_path
+        .strip_prefix("/augment")
+        .unwrap_or(raw_path)
+        .to_string()
+}
+
+fn build_upstream_url(base_url: &str, path: &str, raw_query: Option<&str>) -> String {
+    let mut upstream_url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    if let Some(query) = raw_query.filter(|query| !query.is_empty()) {
+        upstream_url.push('?');
+        upstream_url.push_str(query);
+    }
+    upstream_url
+}
+
+fn should_forward_request_header(name: &str) -> bool {
+    !name.eq_ignore_ascii_case("host")
+        && !name.eq_ignore_ascii_case("authorization")
+        && !name.eq_ignore_ascii_case("content-length")
+}
+
 async fn handle_augment_proxy(
     full_path: FullPath,
     method: Method,
@@ -49,10 +71,7 @@ async fn handle_augment_proxy(
 ) -> Result<Box<dyn Reply>, Rejection> {
     // 从 /augment/v1/responses 提取 /v1/responses
     let raw_path = full_path.as_str();
-    let inner_path = raw_path
-        .strip_prefix("/augment")
-        .unwrap_or(raw_path)
-        .to_string();
+    let inner_path = inner_path(raw_path);
 
     println!(
         "[AugmentProxy] {} {} → sidecar {}",
@@ -72,71 +91,20 @@ async fn handle_augment_proxy(
 
     // 确保 sidecar 正在运行
     let (base_url, api_key) = {
-        let sidecar_opt = {
-            let guard = state.augment_sidecar.lock().unwrap();
-            guard.is_some()
-        };
-        if !sidecar_opt {
-            return Err(warp::reject::custom(
-                AugmentProxyRejection::SidecarNotReady("Sidecar not initialized (cliproxy-server binary not found)".into()),
-            ));
-        }
-
-        // Sync accounts and ensure running - need to drop lock before await
-        {
-            let mut guard = state.augment_sidecar.lock().unwrap();
-            let sidecar = guard.as_mut().unwrap();
-            sidecar.sync_accounts(&tokens).map_err(|e| {
-                warp::reject::custom(AugmentProxyRejection::SidecarNotReady(e))
-            })?;
-        }
-
-        // Now do the async ensure_running outside the lock
-        // We use a tokio Mutex pattern: extract what we need, do async work, then update
-        let needs_start = {
-            let guard = state.augment_sidecar.lock().unwrap();
-            let sidecar = guard.as_ref().unwrap();
-            !sidecar.is_running()
-        };
-
-        if needs_start {
-            // Start sidecar - we need mutable access but can't hold std::sync::Mutex across await
-            // Use a tokio::task::spawn_blocking approach or restructure
-            let state_clone = state.clone();
-            let tokens_clone = tokens.clone();
-            let start_result = tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    let mut guard = state_clone.augment_sidecar.lock().unwrap();
-                    let sidecar = guard.as_mut().unwrap();
-                    sidecar.start(&tokens_clone).await
-                })
-            })
-            .await
-            .map_err(|e| {
-                warp::reject::custom(AugmentProxyRejection::SidecarNotReady(e.to_string()))
-            })?;
-
-            if let Err(e) = start_result {
-                return Err(warp::reject::custom(
-                    AugmentProxyRejection::SidecarNotReady(e),
-                ));
-            }
-        }
-
-        let guard = state.augment_sidecar.lock().unwrap();
-        let sidecar = guard.as_ref().unwrap();
+        let mut guard = state.augment_sidecar.lock().await;
+        let sidecar = guard.as_mut().ok_or_else(|| {
+            warp::reject::custom(AugmentProxyRejection::SidecarNotReady(
+                "Sidecar not initialized (cliproxy-server binary not found)".into(),
+            ))
+        })?;
+        sidecar.ensure_running(&tokens).await.map_err(|e| {
+            warp::reject::custom(AugmentProxyRejection::SidecarNotReady(e))
+        })?;
         (sidecar.base_url(), sidecar.api_key().to_string())
     };
 
     // 构建转发 URL
-    let mut upstream_url = format!("{}{}", base_url, inner_path);
-    if let Some(ref q) = query {
-        if !q.is_empty() {
-            upstream_url.push('?');
-            upstream_url.push_str(q);
-        }
-    }
+    let upstream_url = build_upstream_url(&base_url, &inner_path, query.as_deref());
 
     // 转发请求到 sidecar
     let client = reqwest::Client::new();
@@ -147,8 +115,7 @@ async fn handle_augment_proxy(
 
     // 复制请求头，替换 Authorization
     for (name, value) in headers.iter() {
-        let name_str = name.as_str().to_lowercase();
-        if name_str == "host" || name_str == "authorization" || name_str == "content-length" {
+        if !should_forward_request_header(name.as_str()) {
             continue;
         }
         req_builder = req_builder.header(name, value);
@@ -299,3 +266,35 @@ pub enum AugmentProxyRejection {
 }
 
 impl warp::reject::Reject for AugmentProxyRejection {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inner_path_strips_augment_prefix() {
+        assert_eq!(inner_path("/augment/v1/responses"), "/v1/responses");
+        assert_eq!(inner_path("/augment/v1/chat/completions"), "/v1/chat/completions");
+        assert_eq!(inner_path("/v1/models"), "/v1/models");
+    }
+
+    #[test]
+    fn upstream_url_preserves_raw_query() {
+        assert_eq!(
+            build_upstream_url("http://127.0.0.1:9000", "/v1/models", Some("a=1&b=2")),
+            "http://127.0.0.1:9000/v1/models?a=1&b=2"
+        );
+        assert_eq!(
+            build_upstream_url("http://127.0.0.1:9000", "/v1/models", None),
+            "http://127.0.0.1:9000/v1/models"
+        );
+    }
+
+    #[test]
+    fn authorization_header_is_not_forwarded() {
+        assert!(!should_forward_request_header("authorization"));
+        assert!(!should_forward_request_header("Authorization"));
+        assert!(!should_forward_request_header("content-length"));
+        assert!(should_forward_request_header("x-request-id"));
+    }
+}

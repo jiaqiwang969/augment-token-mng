@@ -98,7 +98,7 @@ pub struct AppState {
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
     // Augment API 代理 sidecar
-    pub augment_sidecar: Arc<Mutex<Option<AugmentSidecar>>>,
+    pub augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
 }
 
 pub fn run() {
@@ -159,7 +159,7 @@ pub fn run() {
                 codex_server_config: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
-                augment_sidecar: Arc::new(Mutex::new({
+                augment_sidecar: Arc::new(tokio::sync::Mutex::new({
                     // 查找 cliproxy-server 二进制：优先 resources 目录，其次 PATH
                     let binary = app_data_dir.parent()
                         .map(|p| p.join("resources").join("cliproxy-server"))
