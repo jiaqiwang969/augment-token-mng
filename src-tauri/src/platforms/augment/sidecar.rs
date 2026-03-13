@@ -19,6 +19,7 @@ pub struct AugmentSidecar {
     port: u16,
     child: Option<Child>,
     auth_dir: PathBuf,
+    home_dir: PathBuf,
     config_path: PathBuf,
     api_key: String,
     binary_path: PathBuf,
@@ -28,6 +29,7 @@ impl AugmentSidecar {
     /// 创建新的 sidecar 管理器（不启动进程）
     pub fn new(app_data_dir: &std::path::Path, binary_path: PathBuf) -> Self {
         let auth_dir = app_data_dir.join("cliproxy_auths");
+        let home_dir = app_data_dir.join("cliproxy_home");
         let config_path = app_data_dir.join("cliproxy_config.yaml");
         let api_key = format!("sk-atm-internal-{}", uuid::Uuid::new_v4());
 
@@ -35,6 +37,7 @@ impl AugmentSidecar {
             port: 0,
             child: None,
             auth_dir,
+            home_dir,
             config_path,
             api_key,
             binary_path,
@@ -68,6 +71,8 @@ impl AugmentSidecar {
         // 创建 auth 目录
         std::fs::create_dir_all(&self.auth_dir)
             .map_err(|e| format!("Failed to create auth dir: {}", e))?;
+        std::fs::create_dir_all(self.home_dir.join(".augment"))
+            .map_err(|e| format!("Failed to create sidecar home dir: {}", e))?;
 
         // 同步账号
         self.sync_accounts(tokens)?;
@@ -76,12 +81,19 @@ impl AugmentSidecar {
         self.write_config()?;
 
         // 启动子进程
-        let child = Command::new(&self.binary_path)
+        let mut command = Command::new(&self.binary_path);
+        command
             .arg("-config")
             .arg(&self.config_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+
+        for (key, value) in sidecar_process_env(&self.home_dir) {
+            command.env(key, value);
+        }
+
+        let child = command
             .spawn()
             .map_err(|e| format!("Failed to start cliproxy-server: {}", e))?;
 
@@ -106,6 +118,7 @@ impl AugmentSidecar {
         }
         // 清理临时文件
         let _ = std::fs::remove_dir_all(&self.auth_dir);
+        let _ = std::fs::remove_dir_all(&self.home_dir);
         let _ = std::fs::remove_file(&self.config_path);
         println!("[AugmentSidecar] Stopped");
     }
@@ -236,11 +249,18 @@ impl AugmentSidecar {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    println!(
-                        "[AugmentSidecar] Health check passed after {}ms",
-                        (i + 1) * 500
-                    );
-                    return Ok(());
+                    let ready = match resp.bytes().await {
+                        Ok(body) => models_payload_is_ready(body.as_ref()),
+                        Err(_) => false,
+                    };
+
+                    if ready {
+                        println!(
+                            "[AugmentSidecar] Health check passed after {}ms",
+                            (i + 1) * 500
+                        );
+                        return Ok(());
+                    }
                 }
                 _ => continue,
             }
@@ -259,6 +279,7 @@ impl Drop for AugmentSidecar {
             let _ = child.start_kill();
         }
         let _ = std::fs::remove_dir_all(&self.auth_dir);
+        let _ = std::fs::remove_dir_all(&self.home_dir);
         let _ = std::fs::remove_file(&self.config_path);
     }
 }
@@ -371,6 +392,46 @@ fn yaml_double_quoted(value: &str) -> String {
     )
 }
 
+fn sidecar_process_env(home_dir: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
+    let home_dir = home_dir.to_path_buf();
+    let mut env = vec![
+        ("HOME", home_dir.clone()),
+        ("USERPROFILE", home_dir.clone()),
+    ];
+
+    if let Some((drive, path)) = split_windows_home_components(&home_dir) {
+        env.push(("HOMEDRIVE", PathBuf::from(drive)));
+        env.push(("HOMEPATH", PathBuf::from(path)));
+    }
+
+    env
+}
+
+fn split_windows_home_components(home_dir: &std::path::Path) -> Option<(String, String)> {
+    let normalized = home_dir.to_string_lossy().replace('/', "\\");
+    let bytes = normalized.as_bytes();
+
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || bytes[2] != b'\\'
+    {
+        return None;
+    }
+
+    Some((normalized[..2].to_string(), normalized[2..].to_string()))
+}
+
+fn models_payload_is_ready(body: &[u8]) -> bool {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    json.get("data")
+        .and_then(|data| data.as_array())
+        .is_some_and(|models| !models.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +517,74 @@ mod tests {
         );
 
         assert!(yaml.contains("auth-dir: \"C:\\\\Users\\\\me\\\\\\\"quoted\\\"\\\\ATM Data\""));
+    }
+
+    #[test]
+    fn sidecar_uses_isolated_home_dir_under_app_data() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        assert_eq!(sidecar.home_dir, temp_dir.path().join("cliproxy_home"));
+    }
+
+    #[test]
+    fn sidecar_process_env_overrides_home_with_isolated_dir() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        let env = sidecar_process_env(&sidecar.home_dir);
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "HOME")
+                .map(|(_, value)| value.as_path()),
+            Some(sidecar.home_dir.as_path())
+        );
+    }
+
+    #[test]
+    fn sidecar_process_env_sets_userprofile_to_isolated_dir() {
+        let temp_dir = tempdir().unwrap();
+        let sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        let env = sidecar_process_env(&sidecar.home_dir);
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "USERPROFILE")
+                .map(|(_, value)| value.as_path()),
+            Some(sidecar.home_dir.as_path())
+        );
+    }
+
+    #[test]
+    fn sidecar_process_env_sets_windows_home_components_when_possible() {
+        let env = sidecar_process_env(Path::new(r"C:\Users\me\AppData\Roaming\ATM\cliproxy_home"));
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "HOMEDRIVE")
+                .map(|(_, value)| value.to_string_lossy().into_owned()),
+            Some("C:".to_string())
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "HOMEPATH")
+                .map(|(_, value)| value.to_string_lossy().into_owned()),
+            Some(r"\Users\me\AppData\Roaming\ATM\cliproxy_home".to_string())
+        );
+    }
+
+    #[test]
+    fn models_payload_is_not_ready_when_model_list_is_empty() {
+        assert!(!models_payload_is_ready(br#"{"data":[],"object":"list"}"#));
+    }
+
+    #[test]
+    fn models_payload_is_ready_when_model_list_is_present() {
+        assert!(models_payload_is_ready(
+            br#"{"data":[{"id":"gpt-5","object":"model"}],"object":"list"}"#
+        ));
     }
 
     #[test]
