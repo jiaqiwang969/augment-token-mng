@@ -10,8 +10,8 @@ use warp::http::{HeaderMap, Method, StatusCode};
 use warp::path::FullPath;
 use warp::{Filter, Rejection, Reply};
 
-use crate::data::storage::augment::traits::TokenStorage;
 use crate::AppState;
+use crate::data::storage::augment::traits::TokenStorage;
 
 /// Augment 代理路由
 pub fn augment_routes_from_state(
@@ -31,8 +31,8 @@ pub fn augment_routes_from_state(
         .and_then(handle_augment_proxy)
 }
 
-fn optional_raw_query() -> impl Filter<Extract = (Option<String>,), Error = std::convert::Infallible> + Clone
-{
+fn optional_raw_query()
+-> impl Filter<Extract = (Option<String>,), Error = std::convert::Infallible> + Clone {
     warp::query::raw()
         .map(Some)
         .or(warp::any().map(|| None))
@@ -79,14 +79,14 @@ async fn handle_augment_proxy(
     );
 
     // 获取可用的 Augment 账号
-    let tokens = get_available_tokens(&state).await.map_err(|e| {
-        warp::reject::custom(AugmentProxyRejection::NoAccounts(e))
-    })?;
+    let tokens = get_available_tokens(&state)
+        .await
+        .map_err(|e| warp::reject::custom(AugmentProxyRejection::NoAccounts(e)))?;
 
     if tokens.is_empty() {
-        return Err(warp::reject::custom(
-            AugmentProxyRejection::NoAccounts("No available Augment accounts".into()),
-        ));
+        return Err(warp::reject::custom(AugmentProxyRejection::NoAccounts(
+            "No available Augment accounts".into(),
+        )));
     }
 
     // 确保 sidecar 正在运行
@@ -97,9 +97,10 @@ async fn handle_augment_proxy(
                 "Sidecar not initialized (cliproxy-server binary not found)".into(),
             ))
         })?;
-        sidecar.ensure_running(&tokens).await.map_err(|e| {
-            warp::reject::custom(AugmentProxyRejection::SidecarNotReady(e))
-        })?;
+        sidecar
+            .ensure_running(&tokens)
+            .await
+            .map_err(|e| warp::reject::custom(AugmentProxyRejection::SidecarNotReady(e)))?;
         (sidecar.base_url(), sidecar.api_key().to_string())
     };
 
@@ -133,8 +134,8 @@ async fn handle_augment_proxy(
         )))
     })?;
 
-    let upstream_status =
-        StatusCode::from_u16(upstream_response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let upstream_status = StatusCode::from_u16(upstream_response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
 
     // 判断是否是 SSE 流式响应
@@ -146,9 +147,7 @@ async fn handle_augment_proxy(
     if is_stream {
         let response =
             build_streaming_response(upstream_status, &upstream_headers, upstream_response)
-                .map_err(|e| {
-                    warp::reject::custom(AugmentProxyRejection::UpstreamError(e))
-                })?;
+                .map_err(|e| warp::reject::custom(AugmentProxyRejection::UpstreamError(e)))?;
         return Ok(Box::new(response) as Box<dyn Reply>);
     }
 
@@ -171,9 +170,7 @@ async fn handle_augment_proxy(
 
     let response = builder
         .body(Body::from(body_bytes))
-        .map_err(|e| {
-            warp::reject::custom(AugmentProxyRejection::UpstreamError(e.to_string()))
-        })?;
+        .map_err(|e| warp::reject::custom(AugmentProxyRejection::UpstreamError(e.to_string())))?;
 
     Ok(Box::new(response) as Box<dyn Reply>)
 }
@@ -220,9 +217,7 @@ fn build_streaming_response(
     builder.body(body).map_err(|e| e.to_string())
 }
 
-async fn get_available_tokens(
-    state: &AppState,
-) -> Result<Vec<crate::storage::TokenData>, String> {
+async fn get_available_tokens(state: &AppState) -> Result<Vec<crate::storage::TokenData>, String> {
     let storage = {
         let guard = state.storage_manager.lock().unwrap();
         guard
@@ -237,23 +232,18 @@ async fn get_available_tokens(
         .map_err(|e| format!("Failed to load tokens: {}", e))?;
 
     // 过滤可用账号
-    Ok(tokens
-        .into_iter()
-        .filter(|t| {
-            !t.access_token.is_empty()
-                && !t.tenant_url.is_empty()
-                && !is_banned(t)
-        })
-        .collect())
+    Ok(tokens.into_iter().filter(is_token_usable).collect())
+}
+
+fn is_token_usable(token: &crate::storage::TokenData) -> bool {
+    !token.access_token.trim().is_empty()
+        && !token.tenant_url.trim().is_empty()
+        && !is_banned(token)
 }
 
 fn is_banned(token: &crate::storage::TokenData) -> bool {
-    if let Some(ref ban) = token.ban_status {
-        if let Some(s) = ban.as_str() {
-            return s == "SUSPENDED" || s == "INVALID_TOKEN";
-        }
-    }
-    false
+    let status = token.ban_status.as_ref().and_then(|ban| ban.as_str());
+    matches!(status, Some("SUSPENDED" | "INVALID_TOKEN"))
 }
 
 // ==================== 错误类型 ====================
@@ -270,11 +260,40 @@ impl warp::reject::Reject for AugmentProxyRejection {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    fn sample_token() -> crate::storage::TokenData {
+        let now = Utc.with_ymd_and_hms(2026, 3, 13, 1, 2, 3).unwrap();
+
+        crate::storage::TokenData {
+            id: "token-1".to_string(),
+            tenant_url: "https://tenant.augmentcode.com/".to_string(),
+            access_token: "access-token-1".to_string(),
+            created_at: now,
+            updated_at: now,
+            portal_url: None,
+            email_note: None,
+            tag_name: None,
+            tag_color: None,
+            ban_status: None,
+            portal_info: None,
+            auth_session: None,
+            suspensions: None,
+            balance_color_mode: None,
+            skip_check: None,
+            session_updated_at: None,
+            version: 0,
+        }
+    }
 
     #[test]
     fn inner_path_strips_augment_prefix() {
         assert_eq!(inner_path("/augment/v1/responses"), "/v1/responses");
-        assert_eq!(inner_path("/augment/v1/chat/completions"), "/v1/chat/completions");
+        assert_eq!(
+            inner_path("/augment/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
         assert_eq!(inner_path("/v1/models"), "/v1/models");
     }
 
@@ -296,5 +315,45 @@ mod tests {
         assert!(!should_forward_request_header("Authorization"));
         assert!(!should_forward_request_header("content-length"));
         assert!(should_forward_request_header("x-request-id"));
+    }
+
+    #[test]
+    fn token_without_access_token_is_not_usable() {
+        let mut token = sample_token();
+        token.access_token = "   ".to_string();
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn token_without_tenant_url_is_not_usable() {
+        let mut token = sample_token();
+        token.tenant_url = "   ".to_string();
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn suspended_token_is_not_usable() {
+        let mut token = sample_token();
+        token.ban_status = Some(json!("SUSPENDED"));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn invalid_token_status_is_not_usable() {
+        let mut token = sample_token();
+        token.ban_status = Some(json!("INVALID_TOKEN"));
+
+        assert!(!is_token_usable(&token));
+    }
+
+    #[test]
+    fn active_token_with_required_fields_is_usable() {
+        let mut token = sample_token();
+        token.ban_status = Some(json!("ACTIVE"));
+
+        assert!(is_token_usable(&token));
     }
 }
