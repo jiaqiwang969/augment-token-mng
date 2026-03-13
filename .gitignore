@@ -7,4 +7,6 @@ target/
 dist/
 .cursor/
 .claude/
+.entire/
+.vite/
 nul

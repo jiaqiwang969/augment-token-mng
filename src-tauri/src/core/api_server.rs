@@ -136,6 +136,7 @@ pub async fn start_api_server_cmd(
             codex_server_config: state.codex_server_config.clone(),
             codex_log_storage: state.codex_log_storage.clone(),
             proxy_config: state.proxy_config.clone(),
+            augment_sidecar: state.augment_sidecar.clone(),
         }),
         8766,
     )
@@ -741,7 +742,11 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
 
     // Codex /v1/* 路由（复用同一个 HTTP 监听器）
     let codex_routes =
-        crate::platforms::openai::codex::server::codex_routes_from_state(state).boxed();
+        crate::platforms::openai::codex::server::codex_routes_from_state(state.clone()).boxed();
+
+    // Augment /augment/* 代理路由
+    let augment_routes =
+        crate::platforms::augment::proxy_server::augment_routes_from_state(state).boxed();
 
     let cors = warp::cors()
         .allow_any_origin() // 允许任何来源（因为只监听 localhost）
@@ -756,6 +761,7 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
 
     // 组合所有路由
     let routes = api_routes
+        .or(augment_routes)
         .or(codex_routes)
         .with(cors)
         .recover(handle_rejection);
@@ -841,6 +847,34 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             ),
         };
 
+        Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "error": {
+                    "message": message,
+                    "type": code,
+                    "code": status.as_u16().to_string()
+                }
+            })),
+            status,
+        ))
+    } else if let Some(rej) = err.find::<crate::platforms::augment::proxy_server::AugmentProxyRejection>() {
+        let (status, message, code) = match rej {
+            crate::platforms::augment::proxy_server::AugmentProxyRejection::NoAccounts(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "no_augment_accounts",
+            ),
+            crate::platforms::augment::proxy_server::AugmentProxyRejection::SidecarNotReady(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "sidecar_not_ready",
+            ),
+            crate::platforms::augment::proxy_server::AugmentProxyRejection::UpstreamError(msg) => (
+                warp::http::StatusCode::BAD_GATEWAY,
+                msg.as_str(),
+                "augment_upstream_error",
+            ),
+        };
         Ok(warp::reply::with_status(
             warp::reply::json(&json!({
                 "error": {

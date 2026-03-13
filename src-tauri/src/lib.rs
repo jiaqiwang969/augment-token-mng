@@ -42,6 +42,7 @@ use crate::core::tray::TrayState;
 use crate::data::subscription::SubscriptionDualStorage;
 use crate::features::mail::{gptmail, hme, hme_storage::HmeStorage, outlook};
 use crate::platforms::augment::models::AugmentOAuthState;
+use crate::platforms::augment::sidecar::AugmentSidecar;
 use crate::platforms::openai::codex::logger::RequestLogger;
 use crate::platforms::openai::codex::pool::CodexServerConfig;
 use crate::platforms::openai::codex::storage::CodexLogStorage;
@@ -96,6 +97,8 @@ pub struct AppState {
     pub codex_server_config: Arc<Mutex<Option<CodexServerConfig>>>,
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
+    // Augment API 代理 sidecar
+    pub augment_sidecar: Arc<Mutex<Option<AugmentSidecar>>>,
 }
 
 pub fn run() {
@@ -156,6 +159,25 @@ pub fn run() {
                 codex_server_config: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
+                augment_sidecar: Arc::new(Mutex::new({
+                    // 查找 cliproxy-server 二进制：优先 resources 目录，其次 PATH
+                    let binary = app_data_dir.parent()
+                        .map(|p| p.join("resources").join("cliproxy-server"))
+                        .filter(|p| p.exists())
+                        .or_else(|| {
+                            // 开发模式：尝试 src-tauri/resources/
+                            let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                                .join("resources")
+                                .join("cliproxy-server");
+                            if dev_path.exists() { Some(dev_path) } else { None }
+                        })
+                        .or_else(|| {
+                            // fallback: /tmp/cliproxy-server
+                            let tmp = std::path::PathBuf::from("/tmp/cliproxy-server");
+                            if tmp.exists() { Some(tmp) } else { None }
+                        });
+                    binary.map(|b| AugmentSidecar::new(&app_data_dir, b))
+                })),
             };
 
             app.manage(app_state);
@@ -386,6 +408,7 @@ pub fn run() {
                         codex_server_config: state.codex_server_config.clone(),
                         codex_log_storage: state.codex_log_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
+                        augment_sidecar: state.augment_sidecar.clone(),
                     }),
                     8766,
                 ).await {
