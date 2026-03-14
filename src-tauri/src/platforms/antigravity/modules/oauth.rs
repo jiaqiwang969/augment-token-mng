@@ -1,15 +1,37 @@
 use crate::antigravity::models::token::{TokenResponse, UserInfo};
 use crate::http_client::create_proxy_client;
 
-// 使用 Antigravity Manager 的 OAuth 配置
-const CLIENT_ID: &str = "REDACTED_GOOGLE_OAUTH_CLIENT_ID";
-const CLIENT_SECRET: &str = "REDACTED_GOOGLE_OAUTH_CLIENT_SECRET";
+const CLIENT_ID_ENV: &str = "ATM_ANTIGRAVITY_OAUTH_CLIENT_ID";
+const CLIENT_SECRET_ENV: &str = "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 
+fn required_env(name: &str) -> Result<String, String> {
+    let value = std::env::var(name)
+        .map_err(|_| format!("Missing required Antigravity OAuth environment variable: {}", name))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "Antigravity OAuth environment variable is empty: {}",
+            name
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn oauth_client_id() -> Result<String, String> {
+    required_env(CLIENT_ID_ENV)
+}
+
+fn oauth_client_secret() -> Result<String, String> {
+    required_env(CLIENT_SECRET_ENV)
+}
+
 /// 生成 OAuth 授权 URL
-pub fn get_auth_url(redirect_uri: &str) -> String {
+pub fn get_auth_url(redirect_uri: &str) -> Result<String, String> {
+    let client_id = oauth_client_id()?;
+
     // 使用 Antigravity 需要的完整 scopes
     let scopes = vec![
         "https://www.googleapis.com/auth/cloud-platform",
@@ -21,29 +43,32 @@ pub fn get_auth_url(redirect_uri: &str) -> String {
     .join(" ");
 
     let params = vec![
-        ("client_id", CLIENT_ID),
-        ("redirect_uri", redirect_uri),
-        ("response_type", "code"),
-        ("scope", &scopes),
-        ("access_type", "offline"),
-        ("prompt", "consent"),
-        ("include_granted_scopes", "true"),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("response_type", "code".to_string()),
+        ("scope", scopes),
+        ("access_type", "offline".to_string()),
+        ("prompt", "consent".to_string()),
+        ("include_granted_scopes", "true".to_string()),
     ];
 
-    let url = url::Url::parse_with_params(AUTH_URL, &params).expect("Invalid Auth URL");
-    url.to_string()
+    let url = url::Url::parse_with_params(AUTH_URL, &params)
+        .map_err(|e| format!("Invalid Auth URL: {}", e))?;
+    Ok(url.to_string())
 }
 
 /// 使用 Authorization Code 交换 Token
 pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenResponse, String> {
     let client = create_proxy_client()?;
+    let client_id = oauth_client_id()?;
+    let client_secret = oauth_client_secret()?;
 
-    let params = [
-        ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("grant_type", "authorization_code"),
+    let params = vec![
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("grant_type", "authorization_code".to_string()),
     ];
 
     let response = client
@@ -67,12 +92,14 @@ pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenRespon
 /// 使用 refresh_token 刷新 access_token
 pub async fn refresh_access_token(refresh_token: &str) -> Result<TokenResponse, String> {
     let client = create_proxy_client()?;
+    let client_id = oauth_client_id()?;
+    let client_secret = oauth_client_secret()?;
 
-    let params = [
-        ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
-        ("refresh_token", refresh_token),
-        ("grant_type", "refresh_token"),
+    let params = vec![
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("refresh_token", refresh_token.to_string()),
+        ("grant_type", "refresh_token".to_string()),
     ];
 
     let response = client

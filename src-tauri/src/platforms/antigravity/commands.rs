@@ -223,7 +223,7 @@ pub async fn antigravity_launch() -> Result<(), String> {
 /// 获取 OAuth 授权 URL
 #[tauri::command]
 pub async fn antigravity_get_auth_url(redirect_uri: String) -> Result<String, String> {
-    Ok(oauth::get_auth_url(&redirect_uri))
+    oauth::get_auth_url(&redirect_uri)
 }
 
 /// 使用授权码交换 Token
