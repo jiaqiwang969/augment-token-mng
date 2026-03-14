@@ -13,6 +13,7 @@ pub mod models;
 pub mod pool;
 pub mod server;
 pub mod storage;
+pub mod team_profiles;
 
 pub use executor::CodexExecutor;
 pub use logger::RequestLogger;

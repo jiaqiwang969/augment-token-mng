@@ -266,6 +266,53 @@ fn matches_query(log: &RequestLog, query: &LogQuery) -> bool {
             return false;
         }
     }
+    if let Some(member_code) = &query.member_code {
+        if !member_code.trim().is_empty() && log.member_code.as_deref() != Some(member_code.trim())
+        {
+            return false;
+        }
+    }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_log(id: &str, member_code: Option<&str>) -> RequestLog {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "timestamp": 1_710_000_000,
+            "account_id": "account-1",
+            "account_email": "user@example.com",
+            "model": "gpt-5",
+            "format": "openai-responses",
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "total_tokens": 30,
+            "status": "success",
+            "error_message": null,
+            "request_duration_ms": 120,
+            "gateway_profile_id": "codex-profile",
+            "gateway_profile_name": "Team Member",
+            "member_code": member_code,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn query_logs_filters_by_member_code() {
+        let mut logger = RequestLogger::new(20);
+        logger.add_log(build_log("jdd-log", Some("jdd")));
+        logger.add_log(build_log("jqw-log", Some("jqw")));
+
+        let query: LogQuery =
+            serde_json::from_value(serde_json::json!({ "memberCode": "jdd" })).unwrap();
+        let page = logger.query_logs(&query);
+        let row = serde_json::to_value(&page.items[0]).unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(row["member_code"], "jdd");
+    }
 }

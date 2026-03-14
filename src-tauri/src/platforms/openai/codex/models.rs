@@ -290,6 +290,16 @@ pub struct RequestLog {
     pub gateway_profile_id: Option<String>,
     #[serde(default)]
     pub gateway_profile_name: Option<String>,
+    #[serde(default)]
+    pub member_code: Option<String>,
+    #[serde(default)]
+    pub role_title: Option<String>,
+    #[serde(default)]
+    pub display_label: Option<String>,
+    #[serde(default)]
+    pub api_key_suffix: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// Token 统计数据
@@ -345,6 +355,12 @@ pub struct DailyStatsResponse {
 pub struct GatewayDailyStatsSeries {
     pub profile_id: String,
     pub profile_name: String,
+    #[serde(default)]
+    pub member_code: Option<String>,
+    #[serde(default)]
+    pub role_title: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub stats: Vec<DailyStats>,
 }
 
@@ -372,6 +388,8 @@ pub struct LogQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+    #[serde(default)]
+    pub member_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

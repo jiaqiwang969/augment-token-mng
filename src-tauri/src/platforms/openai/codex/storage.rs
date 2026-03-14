@@ -68,6 +68,11 @@ impl CodexLogStorage {
 
         ensure_column_exists(conn, "codex_requests", "gateway_profile_id", "TEXT")?;
         ensure_column_exists(conn, "codex_requests", "gateway_profile_name", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "member_code", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "role_title", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "display_label", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "api_key_suffix", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "color", "TEXT")?;
 
         // 创建索引
         conn.execute(
@@ -95,6 +100,11 @@ impl CodexLogStorage {
             [],
         )
         .map_err(|e| format!("Failed to create gateway profile index: {}", e))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_code ON codex_requests(member_code)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create member_code index: {}", e))?;
 
         Ok(())
     }
@@ -118,8 +128,9 @@ impl CodexLogStorage {
                  (id, timestamp, account_id, account_email, model, format,
                   input_tokens, output_tokens, total_tokens, status,
                   error_message, request_duration_ms, date_key,
-                  gateway_profile_id, gateway_profile_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  gateway_profile_id, gateway_profile_name, member_code, role_title,
+                  display_label, api_key_suffix, color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     log.id.clone(),
                     log.timestamp,
@@ -136,6 +147,11 @@ impl CodexLogStorage {
                     date_key,
                     log.gateway_profile_id.clone(),
                     log.gateway_profile_name.clone(),
+                    log.member_code.clone(),
+                    log.role_title.clone(),
+                    log.display_label.clone(),
+                    log.api_key_suffix.clone(),
+                    log.color.clone(),
                 ],
             )
             .map_err(|e| format!("Failed to insert log: {}", e))?;
@@ -200,6 +216,14 @@ impl CodexLogStorage {
                 ));
             }
         }
+        if let Some(member_code) = &query.member_code {
+            if !member_code.trim().is_empty() {
+                sql.push_str(&format!(
+                    " AND member_code = '{}'",
+                    member_code.trim().replace('\'', "''")
+                ));
+            }
+        }
 
         // 先获取总数
         let count_sql = sql.replace("SELECT *", "SELECT COUNT(*)");
@@ -237,6 +261,11 @@ impl CodexLogStorage {
                     request_duration_ms: row.get(11)?,
                     gateway_profile_id: row.get(13)?,
                     gateway_profile_name: row.get(14)?,
+                    member_code: row.get(15)?,
+                    role_title: row.get(16)?,
+                    display_label: row.get(17)?,
+                    api_key_suffix: row.get(18)?,
+                    color: row.get(19)?,
                 })
             })
             .map_err(|e| format!("Failed to execute query: {}", e))?;
@@ -431,40 +460,63 @@ impl CodexLogStorage {
             .prepare(
                 "SELECT date_key,
                         COALESCE(gateway_profile_id, 'legacy') AS profile_id,
-                        COALESCE(gateway_profile_name, 'Legacy') AS profile_name,
+                        COALESCE(gateway_profile_name, display_label, 'Legacy') AS profile_name,
+                        member_code,
+                        role_title,
+                        color,
                         COUNT(*) AS requests,
                         COALESCE(SUM(total_tokens), 0) AS tokens
                  FROM codex_requests
                  WHERE timestamp >= ?1 AND timestamp <= ?2
-                 GROUP BY date_key, profile_id, profile_name
+                 GROUP BY date_key, profile_id, profile_name, member_code, role_title, color
                  ORDER BY profile_name ASC, date_key ASC",
             )
             .map_err(|e| format!("Failed to prepare gateway daily stats query: {}", e))?;
 
-        let mut grouped: BTreeMap<(String, String), BTreeMap<i64, (u64, u64)>> = BTreeMap::new();
+        let mut grouped: BTreeMap<
+            (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+            BTreeMap<i64, (u64, u64)>,
+        > = BTreeMap::new();
         let rows = stmt
             .query_map([start_ts, end_ts], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    row.get::<_, i64>(4)?.max(0) as u64,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)? as u64,
+                    row.get::<_, i64>(7)?.max(0) as u64,
                 ))
             })
             .map_err(|e| format!("Failed to execute gateway daily stats query: {}", e))?;
 
         for row in rows {
-            let (date_key, profile_id, profile_name, requests, tokens) =
-                row.map_err(|e| format!("Failed to read gateway daily stats row: {}", e))?;
+            let (
+                date_key,
+                profile_id,
+                profile_name,
+                member_code,
+                role_title,
+                color,
+                requests,
+                tokens,
+            ) = row.map_err(|e| format!("Failed to read gateway daily stats row: {}", e))?;
             grouped
-                .entry((profile_id, profile_name))
+                .entry((profile_id, profile_name, member_code, role_title, color))
                 .or_default()
                 .insert(date_key, (requests, tokens));
         }
 
         let mut series = Vec::new();
-        for ((profile_id, profile_name), per_day) in grouped {
+        for ((profile_id, profile_name, member_code, role_title, color), per_day) in grouped {
             let mut stats = Vec::with_capacity(dates.len());
             for date in &dates {
                 let date_key = date.format("%Y%m%d").to_string().parse().unwrap_or(0);
@@ -478,6 +530,9 @@ impl CodexLogStorage {
             series.push(GatewayDailyStatsSeries {
                 profile_id,
                 profile_name,
+                member_code,
+                role_title,
+                color,
                 stats,
             });
         }
@@ -583,23 +638,38 @@ mod tests {
         total_tokens: i64,
         gateway_profile_id: Option<&str>,
         gateway_profile_name: Option<&str>,
+        member_code: Option<&str>,
+        role_title: Option<&str>,
+        display_label: Option<&str>,
+        api_key: Option<&str>,
+        color: Option<&str>,
     ) -> RequestLog {
-        RequestLog {
-            id: id.to_string(),
-            timestamp,
-            account_id: "account-1".to_string(),
-            account_email: "user@example.com".to_string(),
-            model: "gpt-5".to_string(),
-            format: "openai-responses".to_string(),
-            input_tokens: total_tokens / 2,
-            output_tokens: total_tokens / 2,
-            total_tokens,
-            status: "success".to_string(),
-            error_message: None,
-            request_duration_ms: Some(120),
-            gateway_profile_id: gateway_profile_id.map(str::to_string),
-            gateway_profile_name: gateway_profile_name.map(str::to_string),
-        }
+        let api_key_suffix = api_key
+            .and_then(|value| value.rsplit('-').next())
+            .map(str::to_string);
+
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "timestamp": timestamp,
+            "account_id": "account-1",
+            "account_email": "user@example.com",
+            "model": "gpt-5",
+            "format": "openai-responses",
+            "input_tokens": total_tokens / 2,
+            "output_tokens": total_tokens / 2,
+            "total_tokens": total_tokens,
+            "status": "success",
+            "error_message": null,
+            "request_duration_ms": 120,
+            "gateway_profile_id": gateway_profile_id,
+            "gateway_profile_name": gateway_profile_name,
+            "member_code": member_code,
+            "role_title": role_title,
+            "display_label": display_label,
+            "api_key_suffix": api_key_suffix,
+            "color": color,
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -611,9 +681,42 @@ mod tests {
 
         storage
             .write_logs_internal(&[
-                build_log("a", yesterday, 100, Some("codex-user-a"), Some("Alice")),
-                build_log("b", now, 200, Some("codex-user-a"), Some("Alice")),
-                build_log("c", now, 300, Some("codex-user-b"), Some("Bob")),
+                build_log(
+                    "a",
+                    yesterday,
+                    100,
+                    Some("codex-user-a"),
+                    Some("Alice"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                build_log(
+                    "b",
+                    now,
+                    200,
+                    Some("codex-user-a"),
+                    Some("Alice"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                build_log(
+                    "c",
+                    now,
+                    300,
+                    Some("codex-user-b"),
+                    Some("Bob"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             ])
             .unwrap();
 
@@ -636,7 +739,9 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         storage
-            .write_logs_internal(&[build_log("legacy", now, 42, None, None)])
+            .write_logs_internal(&[build_log(
+                "legacy", now, 42, None, None, None, None, None, None, None,
+            )])
             .unwrap();
 
         let response = storage.get_daily_stats_by_gateway_profile(1).unwrap();
@@ -645,5 +750,111 @@ mod tests {
         assert_eq!(response.series[0].profile_id, "legacy");
         assert_eq!(response.series[0].profile_name, "Legacy");
         assert_eq!(response.series[0].stats[0].tokens, 42);
+    }
+
+    #[test]
+    fn codex_storage_persists_member_metadata_in_log_results() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexLogStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        storage
+            .write_logs_internal(&[build_log(
+                "member-log",
+                now,
+                128,
+                Some("codex-jdd"),
+                Some("姜大大"),
+                Some("jdd"),
+                Some("产品与方法论"),
+                Some("姜大大 · jdd · 产品与方法论"),
+                Some("sk-team-jdd-a4f29c7e"),
+                Some("#4c6ef5"),
+            )])
+            .unwrap();
+
+        let query: LogQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        let page = storage.query_logs(&query).unwrap();
+        let row = serde_json::to_value(&page.items[0]).unwrap();
+
+        assert_eq!(row["member_code"], "jdd");
+        assert_eq!(row["role_title"], "产品与方法论");
+        assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
+        assert_eq!(row["api_key_suffix"], "a4f29c7e");
+        assert_eq!(row["color"], "#4c6ef5");
+    }
+
+    #[test]
+    fn codex_storage_filters_logs_by_member_code() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexLogStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        storage
+            .write_logs_internal(&[
+                build_log(
+                    "jdd-log",
+                    now,
+                    128,
+                    Some("codex-jdd"),
+                    Some("姜大大"),
+                    Some("jdd"),
+                    Some("产品与方法论"),
+                    Some("姜大大 · jdd · 产品与方法论"),
+                    Some("sk-team-jdd-a4f29c7e"),
+                    Some("#4c6ef5"),
+                ),
+                build_log(
+                    "jqw-log",
+                    now - 1,
+                    256,
+                    Some("codex-jqw"),
+                    Some("佳琪"),
+                    Some("jqw"),
+                    Some("架构与趋势"),
+                    Some("佳琪 · jqw · 架构与趋势"),
+                    Some("sk-team-jqw-3f8d10ab"),
+                    Some("#0ea5e9"),
+                ),
+            ])
+            .unwrap();
+
+        let query: LogQuery =
+            serde_json::from_value(serde_json::json!({ "memberCode": "jdd" })).unwrap();
+        let page = storage.query_logs(&query).unwrap();
+        let row = serde_json::to_value(&page.items[0]).unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(row["member_code"], "jdd");
+    }
+
+    #[test]
+    fn codex_storage_groups_daily_stats_by_member_identity() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexLogStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        storage
+            .write_logs_internal(&[build_log(
+                "member-series",
+                now,
+                512,
+                Some("codex-jdd"),
+                Some("姜大大"),
+                Some("jdd"),
+                Some("产品与方法论"),
+                Some("姜大大 · jdd · 产品与方法论"),
+                Some("sk-team-jdd-a4f29c7e"),
+                Some("#4c6ef5"),
+            )])
+            .unwrap();
+
+        let response = storage.get_daily_stats_by_gateway_profile(1).unwrap();
+        let series = serde_json::to_value(&response.series[0]).unwrap();
+
+        assert_eq!(series["profile_name"], "姜大大");
+        assert_eq!(series["member_code"], "jdd");
+        assert_eq!(series["role_title"], "产品与方法论");
+        assert_eq!(series["color"], "#4c6ef5");
     }
 }

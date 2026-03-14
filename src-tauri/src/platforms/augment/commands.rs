@@ -137,6 +137,11 @@ fn ensure_augment_gateway_profile(
             target: crate::core::gateway_access::GatewayTarget::Augment,
             api_key: gateway_api_key.clone(),
             enabled: true,
+            member_code: None,
+            role_title: None,
+            persona_summary: None,
+            color: None,
+            notes: None,
         });
     crate::core::gateway_access::set_gateway_access_profiles(app, state, profiles)?;
     Ok(gateway_api_key)

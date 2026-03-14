@@ -25,6 +25,16 @@ pub struct GatewayAccessProfile {
     pub api_key: String,
     #[serde(default = "default_profile_enabled")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +63,11 @@ impl GatewayAccessProfiles {
                     target: GatewayTarget::Codex,
                     api_key,
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 }],
             },
             None => Self::default(),
@@ -246,6 +261,11 @@ mod tests {
                 target: GatewayTarget::Augment,
                 api_key: "sk-auggie".into(),
                 enabled: true,
+                member_code: None,
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
             }],
         };
 
@@ -264,6 +284,11 @@ mod tests {
                 target: GatewayTarget::Codex,
                 api_key: "sk-disabled".into(),
                 enabled: false,
+                member_code: None,
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
             }],
         };
 
@@ -280,6 +305,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-codex-a".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "codex-b".into(),
@@ -287,6 +317,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-codex-b".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
             ],
         };
@@ -307,6 +342,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-disabled".into(),
                     enabled: false,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "augment-default".into(),
@@ -314,6 +354,11 @@ mod tests {
                     target: GatewayTarget::Augment,
                     api_key: "sk-augment".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "codex-primary".into(),
@@ -321,6 +366,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "  sk-primary  ".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "codex-secondary".into(),
@@ -328,6 +378,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-secondary".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
             ],
         };
@@ -352,6 +407,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-old".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "codex-user-a".into(),
@@ -359,6 +419,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-alice".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "augment-default".into(),
@@ -366,6 +431,11 @@ mod tests {
                     target: GatewayTarget::Augment,
                     api_key: "sk-augment".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
             ],
         };
@@ -376,6 +446,11 @@ mod tests {
             target: GatewayTarget::Codex,
             api_key: "sk-new".into(),
             enabled: true,
+            member_code: None,
+            role_title: None,
+            persona_summary: None,
+            color: None,
+            notes: None,
         });
 
         let codex_profiles = profiles.list_by_target(GatewayTarget::Codex);
@@ -395,6 +470,11 @@ mod tests {
                 target: GatewayTarget::Augment,
                 api_key: "sk-write-read".into(),
                 enabled: true,
+                member_code: None,
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
             }],
         };
 
@@ -402,5 +482,39 @@ mod tests {
         let loaded = load_gateway_access_profiles(temp_dir.path()).unwrap();
 
         assert_eq!(loaded, profiles);
+    }
+
+    #[test]
+    fn gateway_access_profile_preserves_team_member_metadata() {
+        let temp_dir = tempdir().unwrap();
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![GatewayAccessProfile {
+                id: "codex-jdd".into(),
+                name: "姜大大".into(),
+                target: GatewayTarget::Codex,
+                api_key: "sk-team-jdd-a4f29c7e".into(),
+                enabled: true,
+                member_code: Some("jdd".into()),
+                role_title: Some("产品与方法论".into()),
+                persona_summary: Some(
+                    "高频输出，偏产品与方法论视角，擅长比较工具优劣并推动落地。".into(),
+                ),
+                color: Some("#4c6ef5".into()),
+                notes: Some("高频使用成员".into()),
+            }],
+        };
+
+        write_gateway_access_profiles(temp_dir.path(), &profiles).unwrap();
+        let loaded = load_gateway_access_profiles(temp_dir.path()).unwrap();
+        let profile = loaded.profiles.first().unwrap();
+
+        assert_eq!(profile.member_code.as_deref(), Some("jdd"));
+        assert_eq!(profile.role_title.as_deref(), Some("产品与方法论"));
+        assert_eq!(
+            profile.persona_summary.as_deref(),
+            Some("高频输出，偏产品与方法论视角，擅长比较工具优劣并推动落地。")
+        );
+        assert_eq!(profile.color.as_deref(), Some("#4c6ef5"));
+        assert_eq!(profile.notes.as_deref(), Some("高频使用成员"));
     }
 }
