@@ -91,6 +91,9 @@
               <button class="btn btn--secondary btn--sm" :disabled="isImportingTeam" @click="importTeamTemplate">
                 {{ $t('platform.openai.codexDialog.syncTeamTemplate') }}
               </button>
+              <button class="btn btn--secondary btn--sm" :disabled="teamGatewayProfiles.length === 0" @click="copyAllGatewayAccess">
+                {{ $t('platform.openai.codexDialog.exportAllMembersAccess') }}
+              </button>
               <button class="btn btn--ghost btn--sm" :disabled="isCreatingProfile" @click="createGatewayProfile">
                 {{ $t('platform.openai.codexDialog.addCustomKey') }}
               </button>
@@ -106,9 +109,49 @@
           </div>
 
           <div v-else class="space-y-3">
-            <div class="grid gap-4 xl:grid-cols-2">
+            <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-bg-base/40 p-3">
+              <div>
+                <label class="label mb-0">{{ $t('platform.openai.codexDialog.selectedMemberLabel') }}</label>
+                <p class="mt-1 text-[12px] text-text-muted">
+                  {{ $t('platform.openai.codexDialog.selectedMemberHint') }}
+                </p>
+              </div>
+              <FloatingDropdown placement="bottom-end" :offset="4" width="medium">
+                <template #trigger="{ isOpen }">
+                  <button
+                    class="btn btn--secondary btn--sm min-w-[260px] justify-between gap-2"
+                    :class="{ 'btn--light': !isOpen }"
+                    type="button"
+                  >
+                    <span class="truncate text-left">{{ selectedTeamMemberLabel }}</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M6 9l6 6 6-6"/>
+                    </svg>
+                  </button>
+                </template>
+                <template #default="{ close }">
+                  <div class="py-1">
+                    <button
+                      v-for="profile in teamMemberCards"
+                      :key="profile.id"
+                      class="dropdown-item flex items-center gap-2 px-3 py-1.5 text-[13px]"
+                      :class="{ 'bg-primary/10': profile.id === selectedTeamMemberId }"
+                      @click="selectTeamMember(profile.id, close)"
+                    >
+                      <span
+                        class="h-2.5 w-2.5 rounded-full"
+                        :style="{ backgroundColor: profile.cardColor || '#4c6ef5' }"
+                      ></span>
+                      <span class="truncate">{{ buildProfileDisplayLabel(profile) }}</span>
+                    </button>
+                  </div>
+                </template>
+              </FloatingDropdown>
+            </div>
+
+            <div class="grid gap-4">
               <article
-                v-for="profile in teamMemberCards"
+                v-for="profile in selectedTeamMemberCards"
                 :key="profile.id"
                 class="rounded-xl border border-border bg-muted/10 p-4"
               >
@@ -485,8 +528,57 @@
           </div>
         </div>
 
+        <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-bg-base/40 p-3">
+          <div>
+            <label class="label mb-0">{{ $t('platform.openai.codexDialog.visibleMembersLabel') }}</label>
+            <p class="mt-1 text-[12px] text-text-muted">
+              {{ $t('platform.openai.codexDialog.visibleMembersHint') }}
+            </p>
+          </div>
+          <FloatingDropdown placement="bottom-end" :offset="4" width="medium" :close-on-select="false">
+            <template #trigger="{ isOpen }">
+              <button
+                class="btn btn--secondary btn--sm min-w-[260px] justify-between gap-2"
+                :class="{ 'btn--light': !isOpen }"
+                type="button"
+              >
+                <span class="truncate text-left">{{ analyticsVisibleMembersLabel }}</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+            </template>
+            <template #default>
+              <div class="py-1">
+                <button
+                  class="dropdown-item flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]"
+                  @click="showAllAnalyticsMembers"
+                >
+                  <span>{{ $t('platform.openai.codexDialog.allVisibleMembers') }}</span>
+                  <span class="text-primary">{{ visibleAnalyticsMemberCodes.length === analyticsMemberOptions.length ? '✓' : '' }}</span>
+                </button>
+                <button
+                  v-for="member in analyticsMemberOptions"
+                  :key="member.value"
+                  class="dropdown-item flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]"
+                  @click="toggleAnalyticsMemberVisibility(member.value)"
+                >
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span
+                      class="h-2.5 w-2.5 rounded-full"
+                      :style="{ backgroundColor: member.color || '#4c6ef5' }"
+                    ></span>
+                    <span class="truncate">{{ member.label }}</span>
+                  </span>
+                  <span class="text-primary">{{ isAnalyticsMemberVisible(member.value) ? '✓' : '' }}</span>
+                </button>
+              </div>
+            </template>
+          </FloatingDropdown>
+        </div>
+
         <div class="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.9fr)]">
-          <CodexUsageChart :loading="isLoadingChart" :chart-data="dailyStatsSeries" />
+          <CodexUsageChart :loading="isLoadingChart" :chart-data="filteredDailyStatsSeries" />
 
           <div class="flex h-[320px] flex-col rounded-lg border border-border bg-muted/10 p-3">
             <div class="mb-3 flex items-center justify-between gap-2">
@@ -502,7 +594,7 @@
             </div>
 
             <div
-              v-if="memberRankingRows.length === 0"
+              v-if="filteredMemberRankingRows.length === 0"
               class="flex flex-1 items-center justify-center text-[12px] text-text-muted"
             >
               {{ $t('platform.openai.codexDialog.noMemberRankingData') }}
@@ -521,7 +613,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="profile in memberRankingRows" :key="profile.id">
+                  <tr v-for="profile in filteredMemberRankingRows" :key="profile.id">
                     <td>
                       <div class="flex items-start gap-2">
                         <span
@@ -775,6 +867,11 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import FloatingDropdown from '@/components/common/FloatingDropdown.vue'
 import CodexUsageChart from '@/components/openai/CodexUsageChart.vue'
 import CodexQuickSwitchModal from '@/components/openai/CodexQuickSwitchModal.vue'
+import {
+  buildAllMembersAccessBundle,
+  filterMemberRankingByVisibleMembers,
+  filterTeamSeriesByVisibleMembers
+} from '@/utils/codexTeamUi.js'
 
 defineEmits(['close'])
 
@@ -819,6 +916,8 @@ const availableAccounts = ref([])
 const memberAnalytics = ref([])
 const isLoadingMemberAnalytics = ref(false)
 const memberAnalyticsTruncated = ref(false)
+const selectedTeamMemberId = ref('')
+const visibleAnalyticsMemberCodes = ref([])
 let lastMemberAnalyticsLoadedAt = 0
 const primaryGatewayApiKey = computed(() => {
   const primary = gatewayProfiles.value.find(profile => profile.isPrimary)
@@ -851,6 +950,12 @@ const teamMemberCards = computed(() =>
     }
   })
 )
+const selectedTeamMemberCard = computed(() =>
+  teamMemberCards.value.find(profile => profile.id === selectedTeamMemberId.value) || teamMemberCards.value[0] || null
+)
+const selectedTeamMemberCards = computed(() =>
+  selectedTeamMemberCard.value ? [selectedTeamMemberCard.value] : []
+)
 const memberRankingRows = computed(() =>
   teamMemberCards.value
     .filter(profile => profile.totalRequests > 0 || profile.enabled)
@@ -865,6 +970,36 @@ const memberRankingRows = computed(() =>
       return sortProfilesForDisplay(left, right)
     })
 )
+const analyticsMemberOptions = computed(() =>
+  teamMemberCards.value.map(profile => ({
+    value: normalizeMemberCode(profile.memberCode),
+    label: buildProfileDisplayLabel(profile),
+    color: profile.cardColor || '#4c6ef5'
+  }))
+)
+const selectedTeamMemberLabel = computed(() =>
+  selectedTeamMemberCard.value?.displayLabel || $t('platform.openai.codexDialog.selectMember')
+)
+const filteredDailyStatsSeries = computed(() =>
+  filterTeamSeriesByVisibleMembers(dailyStatsSeries.value, visibleAnalyticsMemberCodes.value)
+)
+const filteredMemberRankingRows = computed(() =>
+  filterMemberRankingByVisibleMembers(memberRankingRows.value, visibleAnalyticsMemberCodes.value)
+)
+const analyticsVisibleMembersLabel = computed(() => {
+  const allCodes = analyticsMemberOptions.value.map(option => option.value).filter(Boolean)
+  const currentCodes = visibleAnalyticsMemberCodes.value.filter(Boolean)
+
+  if (currentCodes.length === 0 || currentCodes.length === allCodes.length) {
+    return $t('platform.openai.codexDialog.allVisibleMembers')
+  }
+
+  if (currentCodes.length === 1) {
+    return analyticsMemberOptions.value.find(option => option.value === currentCodes[0])?.label || currentCodes[0]
+  }
+
+  return $t('platform.openai.codexDialog.visibleMembersCount', { count: currentCodes.length })
+})
 const teamSummaryCards = computed(() => ({
   enabledMembers: teamMemberCards.value.filter(profile => profile.enabled).length,
   todayRequests: teamMemberCards.value.reduce((sum, profile) => sum + profile.todayRequests, 0),
@@ -986,6 +1121,8 @@ const formatDuration = (ms) => {
 
 const formatPercent = (value) => `${Number(value || 0).toFixed(1)}%`
 
+const normalizeMemberCode = (value) => String(value || '').trim().toLowerCase()
+
 const extractKeySuffix = (apiKey) => {
   const trimmed = String(apiKey || '').trim()
   if (!trimmed) {
@@ -1028,6 +1165,28 @@ const buildLogDisplayLabel = (log) => {
     .map(value => String(value || '').trim())
     .filter(Boolean)
   return parts.length > 0 ? parts.join(' · ') : '-'
+}
+
+const syncTeamDashboardState = (profiles) => {
+  if (!Array.isArray(profiles) || profiles.length === 0) {
+    selectedTeamMemberId.value = ''
+    visibleAnalyticsMemberCodes.value = []
+    return
+  }
+
+  if (!profiles.some(profile => profile.id === selectedTeamMemberId.value)) {
+    selectedTeamMemberId.value = profiles[0].id
+  }
+
+  const allCodes = profiles
+    .map(profile => normalizeMemberCode(profile.memberCode))
+    .filter(Boolean)
+
+  const keptVisibleCodes = visibleAnalyticsMemberCodes.value
+    .map(normalizeMemberCode)
+    .filter(code => allCodes.includes(code))
+
+  visibleAnalyticsMemberCodes.value = keptVisibleCodes.length > 0 ? keptVisibleCodes : allCodes
 }
 
 const getTodayStartTs = () => {
@@ -1444,6 +1603,50 @@ const copyGatewayAccess = async (profile) => {
   await copyText(payload)
 }
 
+const copyAllGatewayAccess = async () => {
+  const payload = buildAllMembersAccessBundle({
+    baseUrl: publicServerUrl,
+    profiles: teamMemberCards.value
+  })
+  await copyText(payload)
+}
+
+const selectTeamMember = (profileId, close) => {
+  selectedTeamMemberId.value = profileId
+  close()
+}
+
+const isAnalyticsMemberVisible = (memberCode) =>
+  visibleAnalyticsMemberCodes.value.includes(normalizeMemberCode(memberCode))
+
+const showAllAnalyticsMembers = () => {
+  visibleAnalyticsMemberCodes.value = analyticsMemberOptions.value
+    .map(option => option.value)
+    .filter(Boolean)
+}
+
+const toggleAnalyticsMemberVisibility = (memberCode) => {
+  const normalizedCode = normalizeMemberCode(memberCode)
+  if (!normalizedCode) {
+    return
+  }
+
+  const current = new Set(visibleAnalyticsMemberCodes.value.map(normalizeMemberCode).filter(Boolean))
+  if (current.has(normalizedCode)) {
+    current.delete(normalizedCode)
+  } else {
+    current.add(normalizedCode)
+  }
+
+  const nextVisibleCodes = analyticsMemberOptions.value
+    .map(option => option.value)
+    .filter(code => current.has(code))
+
+  visibleAnalyticsMemberCodes.value = nextVisibleCodes.length > 0
+    ? nextVisibleCodes
+    : analyticsMemberOptions.value.map(option => option.value).filter(Boolean)
+}
+
 const getStrategyLabel = (value) => {
   const option = strategyOptions.find(s => s.value === value)
   return option?.label || value
@@ -1539,6 +1742,10 @@ watch(logModelFilter, () => {
     reloadLogs()
   }, 500)
 })
+
+watch(teamMemberCards, (profiles) => {
+  syncTeamDashboardState(profiles)
+}, { immediate: true })
 
 const loadDailyStats = async () => {
   isLoadingChart.value = true
