@@ -6,7 +6,7 @@
 
 **Architecture:** ATM remains the control plane that selects Augment accounts, syncs auth files, and proxies `/augment/v1/*` requests. CLIProxyAPI remains the black-box translator that exposes the OpenAI-compatible API surface and talks to Augment upstream.
 
-**Tech Stack:** Rust, Tauri 2, tokio, warp, reqwest, serde_json, bundled Go binary (`cliproxy-server`)
+**Tech Stack:** Rust, Tauri 2, tokio, warp, reqwest, serde_json, build-generated Go sidecar (`cliproxy-server`)
 
 ---
 
@@ -292,7 +292,7 @@ git commit -m "feat(augment): wire ATM proxy routes to sidecar"
 
 **Files:**
 - Modify: `src-tauri/tauri.conf.json`
-- Verify: `src-tauri/resources/cliproxy-server`
+- Verify: `src-tauri/resources/cliproxy-server` (generated artifact)
 - Verify: `src-tauri/src/platforms/augment/sidecar.rs`
 - Verify: `docs/plans/2026-03-13-atm-augment-sidecar-design.md`
 

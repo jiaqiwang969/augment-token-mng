@@ -10,14 +10,14 @@
 
 - ATM/Tauri 继续做控制平面
 - `cliproxy-server` 继续做协议翻译引擎
-- 用户继续只启动 ATM，不需要手工启动第二个服务
+- 用户继续只启动 ATM，不需要手动启动第二个服务
 
 ## Problem Statement
 
 当前状态已经完成了运行层集成，但还没有完成源码层集成：
 
 - `augment-token-mng` 负责 sidecar 生命周期、统一 `/v1` 网关、账号同步、UI 配置
-- `cliproxy-server` 以预编译二进制形式打包在 ATM 中
+- `cliproxy-server` 仍然通过 ATM 的 bundle 资源路径提供给运行时，但来源将切换为仓内源码构建产物
 - 真正的翻译逻辑、`previous_response_id` continuation、Auggie/OpenAI 协议适配仍然只存在于外部 Go 仓库
 
 这导致三个实际问题：
@@ -147,7 +147,7 @@ Tauri 构建前执行 sidecar 编译，建议顺序为：
 目标效果：
 
 - `cargo tauri dev` / `cargo tauri build` 使用当前仓库里的 Go 源码现编 sidecar
-- `src-tauri/resources/cliproxy-server` 仍然是运行时查找路径，尽量不改现有 Rust sidecar 代码
+- `src-tauri/resources/cliproxy-server` 仍然是运行时查找路径和 bundle 资源路径，但它属于生成产物，不再手工维护或长期跟踪
 
 ## Runtime Design
 
@@ -193,7 +193,7 @@ Tauri 构建前执行 sidecar 编译，建议顺序为：
 
 - 更新文档
 - 删除“依赖外部 CLIProxyAPI 仓库手工编译”的说明
-- 把生成物加入合适的忽略规则或产物规则
+- 把生成物加入合适的忽略规则或产物规则，并停止把 `src-tauri/resources/cliproxy-server` 当作手工维护文件提交
 
 ### Stage 4: 加强验证
 

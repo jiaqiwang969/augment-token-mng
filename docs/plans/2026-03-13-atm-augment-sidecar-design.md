@@ -100,9 +100,9 @@ Responsibilities:
 
 ### CLIProxyAPI Sidecar
 
-Bundled binary:
+Runtime bundle target:
 
-- `src-tauri/resources/cliproxy-server`
+- `src-tauri/resources/cliproxy-server` (generated from in-repo Go source during build)
 
 Responsibilities:
 
@@ -206,7 +206,8 @@ Bundling is required for the feature to be real.
 
 That means:
 
-- keep `src-tauri/resources/cliproxy-server` in the repo
+- keep `src-tauri/resources/cliproxy-server` as the bundle resource path
+- generate `src-tauri/resources/cliproxy-server` during build instead of hand-maintaining it in git
 - register it in `src-tauri/tauri.conf.json`
 - keep the runtime lookup logic compatible with both dev mode and bundled mode
 
