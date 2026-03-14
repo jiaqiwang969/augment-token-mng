@@ -228,26 +228,27 @@ pub async fn batch_check_account_status_simple(
         let email_note = token_info.email_note.clone();
 
         let handle = tokio::spawn(async move {
-            let (status_code, credit_opt) = match get_credit_info_with_status(&token, &tenant_url).await {
-                Ok(res) => res,
-                Err(err) => {
-                    return TokenStatusResult {
-                        token_id: token_id.clone(),
-                        access_token: token.clone(),
-                        tenant_url: tenant_url.clone(),
-                        status_result: AccountStatus {
-                            status: "ERROR".to_string(),
-                            error_message: Some(format!("Request failed: {}", err)),
-                        },
-                        portal_info: None,
-                        portal_error: Some(err),
-                        suspensions: None,
-                        email_note: email_note.clone(),
-                        portal_url: None,
-                        auth_session: None,
-                    };
-                }
-            };
+            let (status_code, credit_opt) =
+                match get_credit_info_with_status(&token, &tenant_url).await {
+                    Ok(res) => res,
+                    Err(err) => {
+                        return TokenStatusResult {
+                            token_id: token_id.clone(),
+                            access_token: token.clone(),
+                            tenant_url: tenant_url.clone(),
+                            status_result: AccountStatus {
+                                status: "ERROR".to_string(),
+                                error_message: Some(format!("Request failed: {}", err)),
+                            },
+                            portal_info: None,
+                            portal_error: Some(err),
+                            suspensions: None,
+                            email_note: email_note.clone(),
+                            portal_url: None,
+                            auth_session: None,
+                        };
+                    }
+                };
 
             let (status, portal_info, portal_error) = match status_code {
                 200 => {

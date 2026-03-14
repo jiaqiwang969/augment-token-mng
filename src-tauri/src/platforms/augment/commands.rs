@@ -17,6 +17,7 @@ const AUGMENT_GATEWAY_PROFILE_ID: &str = "augment-default";
 const AUGMENT_GATEWAY_PROFILE_NAME: &str = "Augment Default";
 const AUGMENT_AUTH_POOL_ENV_KEY: &str = "OPENAI_API_KEY_POOL_AUGMENT_1";
 const AUGMENT_PROVIDER_ID: &str = "atm-augment";
+const AUGMENT_SMOKE_TEST_MODEL: &str = "gpt-5.4";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,9 +101,10 @@ env_key = "{env_key}"
 fn build_curl_example(base_url: &str, api_key: &str) -> String {
     let chat_url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     format!(
-        "curl {chat_url} \\\n  -H \"Authorization: Bearer {api_key}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{{\n    \"model\": \"gemini-3.1-pro\",\n    \"messages\": [{{\"role\": \"user\", \"content\": \"Hello\"}}]\n  }}'",
+        "curl {chat_url} \\\n  -H \"Authorization: Bearer {api_key}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{{\n    \"model\": \"{model}\",\n    \"messages\": [{{\"role\": \"user\", \"content\": \"Hello\"}}]\n  }}'",
         chat_url = chat_url,
         api_key = api_key,
+        model = AUGMENT_SMOKE_TEST_MODEL,
     )
 }
 
@@ -673,7 +675,7 @@ mod tests {
                 .curl_example
                 .contains("http://127.0.0.1:8766/v1/chat/completions")
         );
-        assert!(config.curl_example.contains("\"model\": \"gemini-3.1-pro\""));
+        assert!(config.curl_example.contains("\"model\": \"gpt-5.4\""));
         assert!(
             config
                 .auth_pool_snippet

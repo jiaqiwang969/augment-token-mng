@@ -250,6 +250,7 @@ const { t } = useI18n()
 const defaultApiServerAddress = 'http://127.0.0.1:8766'
 const defaultProxyBaseUrl = `${defaultApiServerAddress}/v1`
 const defaultEnvKey = 'OPENAI_API_KEY_POOL_AUGMENT_1'
+const defaultSmokeModel = 'gpt-5.4'
 
 const status = ref({
   apiServerRunning: false,
@@ -357,12 +358,16 @@ const sidecarRuntimeText = computed(() => {
 const snippetApiKey = computed(() => currentApiKey.value || accessConfig.value.apiKey || 'sk-your-key')
 
 const curlExample = computed(() => {
+  if (accessConfig.value.curlExample) {
+    return accessConfig.value.curlExample
+  }
+
   const chatUrl = `${currentBaseUrl.value}/chat/completions`
   return `curl ${chatUrl} \\
   -H "Authorization: Bearer ${snippetApiKey.value}" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gemini-3.1-pro",
+    "model": "${defaultSmokeModel}",
     "messages": [{"role": "user", "content": "Hello"}]
   }'`
 })
