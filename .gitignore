@@ -11,3 +11,9 @@ dist/
 .entire/
 .vite/
 nul
+/temp/
+src-tauri/resources/cliproxy-server
+sidecars/cliproxy/apps/server-go/cli-proxy-api
+sidecars/cliproxy/apps/server-go/logs/
+sidecars/cliproxy/apps/server-go/data/
+sidecars/cliproxy/apps/server-go/config.yaml

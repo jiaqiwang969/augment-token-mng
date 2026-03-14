@@ -1,0 +1,27 @@
+.DS_Store
+
+# Swift
+.build/
+DerivedData/
+*.app
+
+# Go
+bin/
+dist/
+*.test
+/apps/server-go/server
+/apps/server-go/cli-proxy-api
+result
+build/
+
+# Logs and temp
+logs/
+tmp/
+temp/
+*.log
+.codex/
+.entire/
+openai-*.tgz
+
+# Local environment
+.env
