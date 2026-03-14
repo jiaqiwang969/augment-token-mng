@@ -113,6 +113,7 @@
             </button>
           </div>
         </div>
+        <AugmentProxyPanel />
       </template>
       <!-- Page Body -->
       <!-- Loading State -->
@@ -667,6 +668,7 @@ import TokenForm from './TokenForm.vue'
 import TokenImportAccountsDialog from './TokenImportAccountsDialog.vue'
 import TagEditorModal from './TagEditorModal.vue'
 import BatchImportModal from './BatchImportModal.vue'
+import AugmentProxyPanel from './AugmentProxyPanel.vue'
 import SyncQueueModal from '../common/SyncQueueModal.vue'
 import DeleteConfirmModal from '../common/DeleteConfirmModal.vue'
 import SessionRefreshModal from './SessionRefreshModal.vue'
