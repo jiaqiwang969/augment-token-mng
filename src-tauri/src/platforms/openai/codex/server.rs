@@ -21,6 +21,7 @@ use super::{
     storage::CodexLogStorage,
 };
 use crate::AppState;
+use crate::core::gateway_access::GatewayAccessProfile;
 use crate::data::storage::common::traits::AccountStorage;
 
 // ==================== 不支持参数缓存 ====================
@@ -178,6 +179,7 @@ pub(crate) async fn handle_unified_gateway_request(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
+    gateway_profile: Option<GatewayAccessProfile>,
     state: Arc<AppState>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     ensure_codex_enabled(&state)?;
@@ -186,7 +188,17 @@ pub(crate) async fn handle_unified_gateway_request(
         return Ok(Box::new(warp::reply::json(&get_models())) as Box<dyn Reply>);
     }
 
-    handle_passthrough_internal(path, method, query, headers, body, state, false).await
+    handle_passthrough_internal(
+        path,
+        method,
+        query,
+        headers,
+        body,
+        gateway_profile,
+        state,
+        false,
+    )
+    .await
 }
 
 async fn handle_passthrough_internal(
@@ -195,6 +207,7 @@ async fn handle_passthrough_internal(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
+    gateway_profile: Option<GatewayAccessProfile>,
     state: Arc<AppState>,
     validate_key_first: bool,
 ) -> Result<Box<dyn Reply>, Rejection> {
@@ -259,6 +272,7 @@ async fn handle_passthrough_internal(
                     &request_model,
                     &request_format,
                     err_text.clone(),
+                    gateway_profile.as_ref(),
                 )
                 .await;
 
@@ -302,6 +316,7 @@ async fn handle_passthrough_internal(
                         &request_model,
                         &request_format,
                         err_text.clone(),
+                        gateway_profile.as_ref(),
                     )
                     .await;
                     return Err(warp::reject::custom(CodexRejection::ExecutionError(
@@ -350,6 +365,7 @@ async fn handle_passthrough_internal(
                 },
                 usage,
                 error_message,
+                gateway_profile.as_ref(),
             );
             record_log(logger, storage, log).await;
 
@@ -369,6 +385,7 @@ async fn handle_passthrough_internal(
                     storage,
                     meta,
                     request_model,
+                    gateway_profile.clone(),
                 )
                 .await
                 .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e)))?;
@@ -384,6 +401,7 @@ async fn handle_passthrough_internal(
                 storage,
                 meta,
                 request_model,
+                gateway_profile.clone(),
             )
             .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
             return Ok(Box::new(response) as Box<dyn Reply>);
@@ -400,6 +418,7 @@ async fn handle_passthrough_internal(
                     &request_model,
                     &request_format,
                     err_text.clone(),
+                    gateway_profile.as_ref(),
                 )
                 .await;
                 return Err(warp::reject::custom(CodexRejection::ExecutionError(
@@ -434,6 +453,7 @@ async fn handle_passthrough_internal(
             },
             usage,
             error_message,
+            gateway_profile.as_ref(),
         );
         record_log(logger, storage, log).await;
 
@@ -453,6 +473,7 @@ async fn destream_responses_sse(
     storage: Option<Arc<CodexLogStorage>>,
     meta: ForwardMeta,
     request_model: String,
+    gateway_profile: Option<GatewayAccessProfile>,
 ) -> Result<Response<Body>, String> {
     let mut stream = response.bytes_stream();
     let mut extractor = SseMetricsExtractor::default();
@@ -500,6 +521,7 @@ async fn destream_responses_sse(
         },
         usage,
         error_message,
+        gateway_profile.as_ref(),
     );
     record_log(logger, storage, log).await;
 
@@ -590,6 +612,7 @@ fn build_streaming_response_with_metrics(
     storage: Option<Arc<CodexLogStorage>>,
     meta: ForwardMeta,
     request_model: String,
+    gateway_profile: Option<GatewayAccessProfile>,
 ) -> Result<Response<Body>, String> {
     let mut builder = Response::builder().status(status);
     for (name, value) in headers.iter() {
@@ -654,6 +677,7 @@ fn build_streaming_response_with_metrics(
             },
             usage,
             error_message,
+            gateway_profile.as_ref(),
         );
         record_log(logger, storage, log).await;
     });
@@ -1042,6 +1066,7 @@ fn build_request_log(
     status: &str,
     usage: UsageStats,
     error_message: Option<String>,
+    gateway_profile: Option<&GatewayAccessProfile>,
 ) -> RequestLog {
     RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1056,6 +1081,8 @@ fn build_request_log(
         status: status.to_string(),
         error_message,
         request_duration_ms: Some(meta.started_at.elapsed().as_millis() as i64),
+        gateway_profile_id: gateway_profile.map(|profile| profile.id.clone()),
+        gateway_profile_name: gateway_profile.map(|profile| profile.name.clone()),
     }
 }
 
@@ -1102,6 +1129,7 @@ async fn add_failed_log(
     model: &str,
     format: &str,
     error: String,
+    gateway_profile: Option<&GatewayAccessProfile>,
 ) {
     let log = RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1116,6 +1144,8 @@ async fn add_failed_log(
         status: "error".to_string(),
         error_message: Some(error),
         request_duration_ms: None,
+        gateway_profile_id: gateway_profile.map(|profile| profile.id.clone()),
+        gateway_profile_name: gateway_profile.map(|profile| profile.name.clone()),
     };
     let mut guard = logger.write().await;
     guard.add_log(log.clone());

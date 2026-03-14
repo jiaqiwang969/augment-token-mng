@@ -902,6 +902,10 @@ pub fn run() {
             crate::platforms::openai::codex::commands::set_codex_selected_account,
             crate::platforms::openai::codex::commands::get_codex_access_config,
             crate::platforms::openai::codex::commands::set_codex_access_config,
+            crate::platforms::openai::codex::commands::list_codex_gateway_profiles,
+            crate::platforms::openai::codex::commands::create_codex_gateway_profile,
+            crate::platforms::openai::codex::commands::update_codex_gateway_profile,
+            crate::platforms::openai::codex::commands::delete_codex_gateway_profile,
             crate::platforms::openai::codex::commands::get_codex_runtime_settings,
             crate::platforms::openai::codex::commands::set_codex_runtime_settings,
             // Codex 日志存储命令
@@ -909,6 +913,7 @@ pub fn run() {
             crate::platforms::openai::codex::commands::get_codex_model_stats_from_storage,
             crate::platforms::openai::codex::commands::get_codex_period_stats_from_storage,
             crate::platforms::openai::codex::commands::get_codex_daily_stats_from_storage,
+            crate::platforms::openai::codex::commands::get_codex_daily_stats_by_gateway_profile_from_storage,
             crate::platforms::openai::codex::commands::clear_codex_logs_in_storage,
             crate::platforms::openai::codex::commands::delete_codex_logs_before,
             crate::platforms::openai::codex::commands::get_codex_log_storage_status,

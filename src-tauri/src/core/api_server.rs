@@ -1,7 +1,7 @@
 use crate::AppState;
-use bytes::Bytes;
 use crate::features::mail::outlook::OutlookManager;
 use crate::storage::{TokenData, TokenStorage};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -314,7 +314,10 @@ fn resolve_gateway_profile_from_profiles(
 ) -> Result<crate::core::gateway_access::GatewayAccessProfile, Rejection> {
     let mut candidates: Vec<&str> = Vec::new();
 
-    if let Some(auth) = headers.get("authorization").and_then(|value| value.to_str().ok()) {
+    if let Some(auth) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+    {
         if let Some(token) = extract_gateway_bearer_token(auth) {
             candidates.push(token);
         }
@@ -345,15 +348,15 @@ fn resolve_gateway_profile(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<crate::core::gateway_access::GatewayAccessProfile, Rejection> {
-    let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(
-        &state.app_handle,
-        state,
-    )
-    .map_err(|err| {
-        warp::reject::custom(crate::platforms::openai::codex::server::CodexRejection::InternalError(
-            format!("Failed to load gateway access profiles: {}", err),
-        ))
-    })?;
+    let profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&state.app_handle, state)
+            .map_err(|err| {
+                warp::reject::custom(
+                    crate::platforms::openai::codex::server::CodexRejection::InternalError(
+                        format!("Failed to load gateway access profiles: {}", err),
+                    ),
+                )
+            })?;
 
     resolve_gateway_profile_from_profiles(&profiles, headers)
 }
@@ -405,13 +408,25 @@ async fn handle_unified_gateway_request(
     match profile.target {
         crate::core::gateway_access::GatewayTarget::Codex => {
             crate::platforms::openai::codex::server::handle_unified_gateway_request(
-                raw_path, method, query, headers, body, state,
+                raw_path,
+                method,
+                query,
+                headers,
+                body,
+                Some(profile),
+                state,
             )
             .await
         }
         crate::core::gateway_access::GatewayTarget::Augment => {
             crate::platforms::augment::proxy_server::handle_unified_gateway_request(
-                raw_path, method, query, headers, body, state,
+                raw_path,
+                method,
+                query,
+                headers,
+                body,
+                Some(profile),
+                state,
             )
             .await
         }
@@ -423,19 +438,18 @@ fn unified_gateway_routes_from_state(
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let state_filter = warp::any().map(move || state.clone());
 
-    let models_route =
-        unified_models_request_filter()
-            .and(state_filter.clone())
-            .and_then(|query, headers, body, state| {
-                handle_unified_gateway_request(
-                    "/v1/models".to_string(),
-                    Method::GET,
-                    query,
-                    headers,
-                    body,
-                    state,
-                )
-            });
+    let models_route = unified_models_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_unified_gateway_request(
+                "/v1/models".to_string(),
+                Method::GET,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
 
     let responses_route = unified_responses_request_filter()
         .and(state_filter.clone())
@@ -1146,9 +1160,7 @@ pub(crate) async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::gateway_access::{
-        GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget,
-    };
+    use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
     use crate::platforms::augment::sidecar::AugmentSidecar;
     use serde_json::Value;
     use std::path::PathBuf;

@@ -8,8 +8,12 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 
 fn required_env(name: &str) -> Result<String, String> {
-    let value = std::env::var(name)
-        .map_err(|_| format!("Missing required Antigravity OAuth environment variable: {}", name))?;
+    let value = std::env::var(name).map_err(|_| {
+        format!(
+            "Missing required Antigravity OAuth environment variable: {}",
+            name
+        )
+    })?;
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(format!(

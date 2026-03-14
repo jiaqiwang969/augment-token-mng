@@ -16,14 +16,18 @@
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
-          <button class="btn btn--secondary btn--sm" :disabled="isRefreshing || isActionLoading" @click="refreshPanel(true)">
+          <button
+            class="btn btn--secondary btn--sm"
+            :disabled="isRefreshing || isActionLoading || isTauriUnavailable"
+            @click="refreshPanel(true)"
+          >
             <span v-if="isRefreshing" class="btn-spinner" aria-hidden="true"></span>
             <span v-else>{{ t('tokenList.proxyPanel.refreshStatus') }}</span>
           </button>
           <button
             v-if="!status.apiServerRunning"
             class="btn btn--primary btn--sm"
-            :disabled="isActionLoading"
+            :disabled="isActionLoading || isTauriUnavailable"
             @click="startServer"
           >
             <span v-if="isActionLoading" class="btn-spinner" aria-hidden="true"></span>
@@ -32,7 +36,7 @@
           <button
             v-else
             class="btn btn--danger btn--sm"
-            :disabled="isActionLoading"
+            :disabled="isActionLoading || isTauriUnavailable"
             @click="stopServer"
           >
             <span v-if="isActionLoading" class="btn-spinner" aria-hidden="true"></span>
@@ -42,11 +46,11 @@
       </div>
 
       <div v-if="loadError" class="mt-3 rounded-lg border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-        {{ t('tokenList.proxyPanel.loadFailed') }}: {{ loadError }}
+        {{ loadError }}
       </div>
 
       <div v-if="accessError" class="mt-3 rounded-lg border border-warning/30 bg-warning/8 px-3 py-2 text-[12px] text-warning">
-        {{ t('tokenList.proxyPanel.loadAccessFailed') }}: {{ accessError }}
+        {{ accessError }}
       </div>
 
       <div class="mt-4 grid gap-3 md:grid-cols-3">
@@ -130,7 +134,7 @@
               </div>
               <button
                 class="btn btn--primary btn--sm"
-                :disabled="isSavingAccessConfig || isAccessLoading"
+                :disabled="isSavingAccessConfig || isAccessLoading || isTauriUnavailable"
                 @click="saveAccessKey"
               >
                 <span v-if="isSavingAccessConfig" class="btn-spinner" aria-hidden="true"></span>
@@ -143,7 +147,7 @@
                 v-model="apiKeyInput"
                 :type="showApiKey ? 'text' : 'password'"
                 class="input font-mono"
-                :disabled="isAccessLoading || isSavingAccessConfig"
+                :disabled="isAccessLoading || isSavingAccessConfig || isTauriUnavailable"
                 :placeholder="t('tokenList.proxyPanel.keyPlaceholder')"
               />
               <button
@@ -244,6 +248,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useI18n } from 'vue-i18n'
+import { hasTauriBridge } from '../../utils/tauriBridge'
 
 const { t } = useI18n()
 
@@ -280,6 +285,7 @@ const isAccessLoading = ref(false)
 const isSavingAccessConfig = ref(false)
 const loadError = ref('')
 const accessError = ref('')
+const isTauriReady = ref(hasTauriBridge())
 
 let unlistenApiServerStatus = null
 let unlistenTokensUpdated = null
@@ -290,6 +296,8 @@ const currentApiKey = computed(() => apiKeyInput.value.trim())
 const hasSavedApiKey = computed(() => !!accessConfig.value.apiKey?.trim())
 const hasUnsavedKey = computed(() => currentApiKey.value !== (accessConfig.value.apiKey || '').trim())
 const exportCommand = computed(() => `export OPENAI_BASE_URL=${currentBaseUrl.value}`)
+const isTauriUnavailable = computed(() => !isTauriReady.value)
+const tauriRequiredMessage = computed(() => t('tokenList.proxyPanel.tauriRequired'))
 
 const overallStatus = computed(() => {
   if (!status.value.apiServerRunning) {
@@ -404,6 +412,37 @@ const normalizeAccessConfig = (raw = {}) => ({
   configPoolSnippet: raw.configPoolSnippet || ''
 })
 
+const syncTauriBridgeStatus = () => {
+  isTauriReady.value = hasTauriBridge()
+  return isTauriReady.value
+}
+
+const clearBridgeErrors = () => {
+  if (loadError.value === tauriRequiredMessage.value) {
+    loadError.value = ''
+  }
+
+  if (accessError.value === tauriRequiredMessage.value) {
+    accessError.value = ''
+  }
+}
+
+const ensureTauriBridge = (showErrorToast = false) => {
+  if (syncTauriBridgeStatus()) {
+    clearBridgeErrors()
+    return true
+  }
+
+  loadError.value = tauriRequiredMessage.value
+  accessError.value = ''
+
+  if (showErrorToast) {
+    window.$notify.error(tauriRequiredMessage.value)
+  }
+
+  return false
+}
+
 const loadStatus = async (showErrorToast = false) => {
   loadError.value = ''
 
@@ -411,7 +450,7 @@ const loadStatus = async (showErrorToast = false) => {
     const nextStatus = await invoke('get_augment_proxy_status')
     status.value = normalizeStatus(nextStatus)
   } catch (error) {
-    loadError.value = String(error)
+    loadError.value = `${t('tokenList.proxyPanel.loadFailed')}: ${error}`
     if (showErrorToast) {
       window.$notify.error(`${t('tokenList.proxyPanel.loadFailed')}: ${error}`)
     }
@@ -427,7 +466,7 @@ const loadAccessConfig = async (showErrorToast = false) => {
     accessConfig.value = normalizeAccessConfig(nextConfig)
     apiKeyInput.value = accessConfig.value.apiKey
   } catch (error) {
-    accessError.value = String(error)
+    accessError.value = `${t('tokenList.proxyPanel.loadAccessFailed')}: ${error}`
     if (showErrorToast) {
       window.$notify.error(`${t('tokenList.proxyPanel.loadAccessFailed')}: ${error}`)
     }
@@ -437,6 +476,10 @@ const loadAccessConfig = async (showErrorToast = false) => {
 }
 
 const refreshPanel = async (showErrorToast = false) => {
+  if (!ensureTauriBridge(showErrorToast)) {
+    return
+  }
+
   isRefreshing.value = true
 
   try {
@@ -484,6 +527,10 @@ const saveAccessKey = async () => {
     return
   }
 
+  if (!ensureTauriBridge(true)) {
+    return
+  }
+
   isSavingAccessConfig.value = true
 
   try {
@@ -507,6 +554,10 @@ const saveAccessKey = async () => {
 }
 
 const startServer = async () => {
+  if (!ensureTauriBridge(true)) {
+    return
+  }
+
   isActionLoading.value = true
 
   try {
@@ -522,6 +573,10 @@ const startServer = async () => {
 }
 
 const stopServer = async () => {
+  if (!ensureTauriBridge(true)) {
+    return
+  }
+
   isActionLoading.value = true
 
   try {
@@ -537,6 +592,10 @@ const stopServer = async () => {
 }
 
 onMounted(async () => {
+  if (!ensureTauriBridge(false)) {
+    return
+  }
+
   await refreshPanel(false)
 
   unlistenApiServerStatus = await listen('api-server-status-changed', async () => {

@@ -68,11 +68,7 @@ fn normalize_api_key(api_key: Option<String>) -> Option<String> {
 }
 
 fn generate_gateway_api_key() -> String {
-    format!(
-        "sk-{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    format!("sk-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 fn build_auth_pool_snippet(api_key: &str) -> String {
@@ -289,10 +285,8 @@ pub async fn get_augment_gateway_access_config(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AugmentGatewayAccessConfig, String> {
-    let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(
-        &app,
-        state.inner(),
-    )?;
+    let profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
     let api_key = match profiles
         .profiles
         .iter()

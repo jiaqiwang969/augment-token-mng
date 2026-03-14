@@ -3,11 +3,12 @@
 //! 使用 SQLite 存储请求日志，支持高效的查询和筛选
 
 use rusqlite::{Connection, params};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::models::{
-    DailyStats, DailyStatsResponse, LogPage, LogQuery, ModelTokenStats, PeriodTokenStats,
-    RequestLog,
+    DailyStats, DailyStatsResponse, GatewayDailyStatsResponse, GatewayDailyStatsSeries, LogPage,
+    LogQuery, ModelTokenStats, PeriodTokenStats, RequestLog,
 };
 
 /// 日志存储管理器
@@ -65,6 +66,9 @@ impl CodexLogStorage {
         )
         .map_err(|e| format!("Failed to create table: {}", e))?;
 
+        ensure_column_exists(conn, "codex_requests", "gateway_profile_id", "TEXT")?;
+        ensure_column_exists(conn, "codex_requests", "gateway_profile_name", "TEXT")?;
+
         // 创建索引
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON codex_requests(timestamp DESC)",
@@ -86,6 +90,11 @@ impl CodexLogStorage {
             [],
         )
         .map_err(|e| format!("Failed to create model index: {}", e))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gateway_profile_id ON codex_requests(gateway_profile_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create gateway profile index: {}", e))?;
 
         Ok(())
     }
@@ -108,8 +117,9 @@ impl CodexLogStorage {
                 "INSERT OR REPLACE INTO codex_requests
                  (id, timestamp, account_id, account_email, model, format,
                   input_tokens, output_tokens, total_tokens, status,
-                  error_message, request_duration_ms, date_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  error_message, request_duration_ms, date_key,
+                  gateway_profile_id, gateway_profile_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     log.id.clone(),
                     log.timestamp,
@@ -124,6 +134,8 @@ impl CodexLogStorage {
                     log.error_message.clone(),
                     log.request_duration_ms,
                     date_key,
+                    log.gateway_profile_id.clone(),
+                    log.gateway_profile_name.clone(),
                 ],
             )
             .map_err(|e| format!("Failed to insert log: {}", e))?;
@@ -223,6 +235,8 @@ impl CodexLogStorage {
                     status: row.get(9)?,
                     error_message: row.get(10)?,
                     request_duration_ms: row.get(11)?,
+                    gateway_profile_id: row.get(13)?,
+                    gateway_profile_name: row.get(14)?,
                 })
             })
             .map_err(|e| format!("Failed to execute query: {}", e))?;
@@ -388,6 +402,89 @@ impl CodexLogStorage {
         Ok(DailyStatsResponse { stats })
     }
 
+    pub fn get_daily_stats_by_gateway_profile(
+        &self,
+        days: u32,
+    ) -> Result<GatewayDailyStatsResponse, String> {
+        let conn = self.get_connection()?;
+        let now = chrono::Utc::now();
+        let day_count = days.max(1);
+
+        let dates: Vec<_> = (0..day_count)
+            .rev()
+            .map(|offset| now - chrono::Duration::days(offset as i64))
+            .map(|dt| dt.date_naive())
+            .collect();
+
+        let start_ts = dates
+            .first()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|dt| dt.and_utc().timestamp())
+            .unwrap_or(0);
+        let end_ts = dates
+            .last()
+            .and_then(|date| date.and_hms_opt(23, 59, 59))
+            .map(|dt| dt.and_utc().timestamp())
+            .unwrap_or(0);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT date_key,
+                        COALESCE(gateway_profile_id, 'legacy') AS profile_id,
+                        COALESCE(gateway_profile_name, 'Legacy') AS profile_name,
+                        COUNT(*) AS requests,
+                        COALESCE(SUM(total_tokens), 0) AS tokens
+                 FROM codex_requests
+                 WHERE timestamp >= ?1 AND timestamp <= ?2
+                 GROUP BY date_key, profile_id, profile_name
+                 ORDER BY profile_name ASC, date_key ASC",
+            )
+            .map_err(|e| format!("Failed to prepare gateway daily stats query: {}", e))?;
+
+        let mut grouped: BTreeMap<(String, String), BTreeMap<i64, (u64, u64)>> = BTreeMap::new();
+        let rows = stmt
+            .query_map([start_ts, end_ts], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)?.max(0) as u64,
+                ))
+            })
+            .map_err(|e| format!("Failed to execute gateway daily stats query: {}", e))?;
+
+        for row in rows {
+            let (date_key, profile_id, profile_name, requests, tokens) =
+                row.map_err(|e| format!("Failed to read gateway daily stats row: {}", e))?;
+            grouped
+                .entry((profile_id, profile_name))
+                .or_default()
+                .insert(date_key, (requests, tokens));
+        }
+
+        let mut series = Vec::new();
+        for ((profile_id, profile_name), per_day) in grouped {
+            let mut stats = Vec::with_capacity(dates.len());
+            for date in &dates {
+                let date_key = date.format("%Y%m%d").to_string().parse().unwrap_or(0);
+                let (requests, tokens) = per_day.get(&date_key).copied().unwrap_or((0, 0));
+                stats.push(DailyStats {
+                    date: date.format("%Y-%m-%d").to_string(),
+                    requests,
+                    tokens,
+                });
+            }
+            series.push(GatewayDailyStatsSeries {
+                profile_id,
+                profile_name,
+                stats,
+            });
+        }
+
+        Ok(GatewayDailyStatsResponse { series })
+    }
+
     /// 清空所有日志
     pub fn clear_all(&self) -> Result<usize, String> {
         let conn = self.get_connection()?;
@@ -441,4 +538,112 @@ fn calculate_date_key(timestamp: i64) -> i64 {
     let dt = chrono::DateTime::from_timestamp(timestamp, 0).unwrap_or_else(chrono::Utc::now);
     let date = dt.format("%Y%m%d").to_string();
     date.parse().unwrap_or(0)
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn
+        .prepare(&pragma)
+        .map_err(|e| format!("Failed to inspect {} schema: {}", table, e))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("Failed to query {} schema: {}", table, e))?;
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Failed to iterate {} schema rows: {}", table, e))?
+    {
+        let existing: String = row
+            .get(1)
+            .map_err(|e| format!("Failed to read {} schema column name: {}", table, e))?;
+        if existing == column {
+            return Ok(());
+        }
+    }
+
+    let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, definition);
+    conn.execute(&sql, [])
+        .map_err(|e| format!("Failed to add {}.{}: {}", table, column, e))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn build_log(
+        id: &str,
+        timestamp: i64,
+        total_tokens: i64,
+        gateway_profile_id: Option<&str>,
+        gateway_profile_name: Option<&str>,
+    ) -> RequestLog {
+        RequestLog {
+            id: id.to_string(),
+            timestamp,
+            account_id: "account-1".to_string(),
+            account_email: "user@example.com".to_string(),
+            model: "gpt-5".to_string(),
+            format: "openai-responses".to_string(),
+            input_tokens: total_tokens / 2,
+            output_tokens: total_tokens / 2,
+            total_tokens,
+            status: "success".to_string(),
+            error_message: None,
+            request_duration_ms: Some(120),
+            gateway_profile_id: gateway_profile_id.map(str::to_string),
+            gateway_profile_name: gateway_profile_name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn codex_storage_groups_daily_stats_by_gateway_profile() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexLogStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let yesterday = now - 24 * 60 * 60;
+
+        storage
+            .write_logs_internal(&[
+                build_log("a", yesterday, 100, Some("codex-user-a"), Some("Alice")),
+                build_log("b", now, 200, Some("codex-user-a"), Some("Alice")),
+                build_log("c", now, 300, Some("codex-user-b"), Some("Bob")),
+            ])
+            .unwrap();
+
+        let response = storage.get_daily_stats_by_gateway_profile(2).unwrap();
+
+        assert_eq!(response.series.len(), 2);
+        assert_eq!(response.series[0].profile_id, "codex-user-a");
+        assert_eq!(response.series[0].profile_name, "Alice");
+        assert_eq!(response.series[0].stats.len(), 2);
+        assert_eq!(response.series[0].stats[0].tokens, 100);
+        assert_eq!(response.series[0].stats[1].tokens, 200);
+        assert_eq!(response.series[1].profile_id, "codex-user-b");
+        assert_eq!(response.series[1].stats[1].tokens, 300);
+    }
+
+    #[test]
+    fn codex_storage_falls_back_to_legacy_series_for_historical_logs_without_profile() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexLogStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        storage
+            .write_logs_internal(&[build_log("legacy", now, 42, None, None)])
+            .unwrap();
+
+        let response = storage.get_daily_stats_by_gateway_profile(1).unwrap();
+
+        assert_eq!(response.series.len(), 1);
+        assert_eq!(response.series[0].profile_id, "legacy");
+        assert_eq!(response.series[0].profile_name, "Legacy");
+        assert_eq!(response.series[0].stats[0].tokens, 42);
+    }
 }

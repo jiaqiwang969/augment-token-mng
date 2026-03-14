@@ -7,14 +7,16 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tokio::sync::Mutex as TokioMutex;
+use uuid::Uuid;
 
 use super::logger::RequestLogger;
 use super::models::{
-    DailyStatsResponse, LogPage, LogQuery, ModelTokenStats, PeriodTokenStats, PoolStrategy,
-    RequestLog, TokenStats,
+    DailyStatsResponse, GatewayDailyStatsResponse, LogPage, LogQuery, ModelTokenStats,
+    PeriodTokenStats, PoolStrategy, RequestLog, TokenStats,
 };
 use super::pool::{CodexServerConfig, CodexServerStatus};
 use crate::AppState;
+use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
 use crate::platforms::openai::codex::server::CodexServer;
 static QUOTA_REFRESH_TASK: std::sync::LazyLock<TokioMutex<Option<tokio::task::JoinHandle<()>>>> =
     std::sync::LazyLock::new(|| TokioMutex::new(None));
@@ -32,12 +34,23 @@ pub struct CodexRuntimeSettings {
     pub fast_mode_enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexGatewayProfileEntry {
+    pub id: String,
+    pub name: String,
+    pub api_key: String,
+    pub enabled: bool,
+    pub is_primary: bool,
+}
+
 const CODEX_CONFIG_FILE: &str = "openai_codex_config.json";
 const SHARED_API_SERVER_PORT: u16 = 8766;
 const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 60;
 const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const CODEX_GATEWAY_PROFILE_ID: &str = "codex-default";
 const CODEX_GATEWAY_PROFILE_NAME: &str = "Codex Default";
+const CODEX_GATEWAY_PROFILE_NAME_PREFIX: &str = "Codex Key";
 
 fn normalize_access_fields(config: &mut CodexServerConfig) {
     config.api_key = config.api_key.as_ref().and_then(|v| {
@@ -200,24 +213,89 @@ fn gateway_server_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/v1", port)
 }
 
+fn normalize_gateway_api_key(api_key: Option<String>) -> Option<String> {
+    api_key.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn generate_gateway_api_key() -> String {
+    format!("sk-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn default_codex_gateway_profile_name(profiles: &GatewayAccessProfiles) -> String {
+    let next_index = profiles
+        .list_by_target(GatewayTarget::Codex)
+        .len()
+        .saturating_add(1);
+    format!("{} {}", CODEX_GATEWAY_PROFILE_NAME_PREFIX, next_index)
+}
+
+fn codex_gateway_profiles(profiles: &GatewayAccessProfiles) -> Vec<CodexGatewayProfileEntry> {
+    let primary_profile_id = profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .find_map(|profile| {
+            if profile.enabled && !profile.api_key.trim().is_empty() {
+                Some(profile.id)
+            } else {
+                None
+            }
+        });
+    profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .map(|profile| {
+            let profile_id = profile.id.clone();
+            let trimmed_key = profile.api_key.trim().to_string();
+            CodexGatewayProfileEntry {
+                id: profile_id.clone(),
+                name: profile.name,
+                api_key: trimmed_key.clone(),
+                enabled: profile.enabled,
+                is_primary: primary_profile_id
+                    .as_deref()
+                    .map(|expected| expected == profile_id)
+                    .unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
 fn gateway_api_key_for_target(
     app: &tauri::AppHandle,
     state: &AppState,
-    target: crate::core::gateway_access::GatewayTarget,
+    target: GatewayTarget,
 ) -> Result<Option<String>, String> {
     let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)?;
-    Ok(profiles
-        .profiles
-        .into_iter()
-        .find(|profile| profile.target == target)
-        .and_then(|profile| {
-            let trimmed = profile.api_key.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }))
+    Ok(profiles.first_enabled_api_key_for_target(target))
+}
+
+fn sync_legacy_codex_access_profile(
+    mut profiles: GatewayAccessProfiles,
+    api_key: Option<String>,
+) -> GatewayAccessProfiles {
+    match normalize_gateway_api_key(api_key) {
+        Some(api_key) => {
+            profiles.upsert_profile(GatewayAccessProfile {
+                id: CODEX_GATEWAY_PROFILE_ID.to_string(),
+                name: CODEX_GATEWAY_PROFILE_NAME.to_string(),
+                target: GatewayTarget::Codex,
+                api_key,
+                enabled: true,
+            });
+        }
+        None => {
+            profiles.remove_profile(CODEX_GATEWAY_PROFILE_ID);
+        }
+    }
+
+    profiles
 }
 
 fn sync_codex_gateway_profile(
@@ -225,25 +303,37 @@ fn sync_codex_gateway_profile(
     state: &AppState,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let mut profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)?;
-    profiles
-        .profiles
-        .retain(|profile| profile.target != crate::core::gateway_access::GatewayTarget::Codex);
-
-    if let Some(api_key) = api_key {
-        profiles
-            .profiles
-            .push(crate::core::gateway_access::GatewayAccessProfile {
-                id: CODEX_GATEWAY_PROFILE_ID.to_string(),
-                name: CODEX_GATEWAY_PROFILE_NAME.to_string(),
-                target: crate::core::gateway_access::GatewayTarget::Codex,
-                api_key,
-                enabled: true,
-            });
-    }
-
-    crate::core::gateway_access::set_gateway_access_profiles(app, state, profiles)?;
+    let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)?;
+    let profiles = sync_legacy_codex_access_profile(profiles, api_key);
+    let profiles = crate::core::gateway_access::set_gateway_access_profiles(app, state, profiles)?;
+    sync_codex_config_api_key_from_profiles(app, state, &profiles)?;
     Ok(())
+}
+
+fn sync_codex_config_api_key_from_profiles(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    profiles: &GatewayAccessProfiles,
+) -> Result<(), String> {
+    let mut config = get_or_load_codex_config(app, state)?;
+    config.api_key = profiles.first_enabled_api_key_for_target(GatewayTarget::Codex);
+    normalize_access_fields(&mut config);
+    normalize_server_port(&mut config);
+    normalize_runtime_fields(&mut config);
+    *state.codex_server_config.lock().unwrap() = Some(config.clone());
+    write_persisted_config(app, &config)?;
+    Ok(())
+}
+
+fn normalize_gateway_profile_name(name: Option<String>) -> Option<String> {
+    name.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 async fn apply_periodic_tasks(app: tauri::AppHandle, state: &AppState, config: &CodexServerConfig) {
@@ -296,8 +386,7 @@ pub async fn init_codex_enabled_state_on_startup(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
-    if let Err(err) = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)
-    {
+    if let Err(err) = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state) {
         eprintln!("Failed to initialize gateway access profiles: {}", err);
     }
 
@@ -643,8 +732,109 @@ pub async fn set_codex_access_config(
 
     Ok(CodexAccessConfig {
         server_url: gateway_server_url(current_api_server_port(state.inner())),
-        api_key: config.api_key,
+        api_key: gateway_api_key_for_target(&app, state.inner(), GatewayTarget::Codex)?,
     })
+}
+
+#[tauri::command]
+pub async fn list_codex_gateway_profiles(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexGatewayProfileEntry>, String> {
+    let profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    Ok(codex_gateway_profiles(&profiles))
+}
+
+#[tauri::command]
+pub async fn create_codex_gateway_profile(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    name: Option<String>,
+    api_key: Option<String>,
+    enabled: Option<bool>,
+) -> Result<CodexGatewayProfileEntry, String> {
+    let mut profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+
+    let entry = GatewayAccessProfile {
+        id: format!("codex-{}", Uuid::new_v4().simple()),
+        name: normalize_gateway_profile_name(name)
+            .unwrap_or_else(|| default_codex_gateway_profile_name(&profiles)),
+        target: GatewayTarget::Codex,
+        api_key: normalize_gateway_api_key(api_key).unwrap_or_else(generate_gateway_api_key),
+        enabled: enabled.unwrap_or(true),
+    };
+    let created_id = entry.id.clone();
+    profiles.upsert_profile(entry);
+
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    codex_gateway_profiles(&profiles)
+        .into_iter()
+        .find(|profile| profile.id == created_id)
+        .ok_or_else(|| "Failed to load created Codex gateway profile".to_string())
+}
+
+#[tauri::command]
+pub async fn update_codex_gateway_profile(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    name: Option<String>,
+    api_key: Option<String>,
+    enabled: Option<bool>,
+) -> Result<CodexGatewayProfileEntry, String> {
+    let mut profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    let mut existing = profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| format!("Codex gateway profile not found: {}", profile_id))?;
+
+    if let Some(name) = normalize_gateway_profile_name(name) {
+        existing.name = name;
+    }
+
+    if let Some(api_key) = api_key {
+        existing.api_key = normalize_gateway_api_key(Some(api_key))
+            .ok_or_else(|| "Codex gateway API key cannot be empty".to_string())?;
+    }
+
+    if let Some(enabled) = enabled {
+        existing.enabled = enabled;
+    }
+
+    let updated_id = existing.id.clone();
+    profiles.upsert_profile(existing);
+
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    codex_gateway_profiles(&profiles)
+        .into_iter()
+        .find(|profile| profile.id == updated_id)
+        .ok_or_else(|| "Failed to load updated Codex gateway profile".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_codex_gateway_profile(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    let mut profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    if !profiles.remove_profile(&profile_id) {
+        return Err(format!("Codex gateway profile not found: {}", profile_id));
+    }
+
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    Ok(())
 }
 
 /// 获取 Codex 运行时设置
@@ -739,6 +929,21 @@ pub async fn get_codex_daily_stats_from_storage(
         s.get_daily_stats(days).map_err(|e| e.to_string())
     } else {
         Ok(DailyStatsResponse { stats: vec![] })
+    }
+}
+
+#[tauri::command]
+pub async fn get_codex_daily_stats_by_gateway_profile_from_storage(
+    state: State<'_, AppState>,
+    days: Option<u32>,
+) -> Result<GatewayDailyStatsResponse, String> {
+    let storage = state.codex_log_storage.lock().unwrap().clone();
+    if let Some(s) = storage {
+        let days = days.unwrap_or(30).min(365);
+        s.get_daily_stats_by_gateway_profile(days)
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(GatewayDailyStatsResponse { series: vec![] })
     }
 }
 
@@ -930,9 +1135,57 @@ async fn stop_periodic_quota_refresh() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
 
     #[test]
     fn codex_access_server_url_uses_unified_v1_base_url() {
         assert_eq!(gateway_server_url(9123), "http://127.0.0.1:9123/v1");
+    }
+
+    #[test]
+    fn codex_access_compat_sync_updates_legacy_profile_without_dropping_other_keys() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-default".into(),
+                    name: "Codex Default".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-old-default".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "codex-user-a".into(),
+                    name: "Alice".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-alice".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "augment-default".into(),
+                    name: "Augment Default".into(),
+                    target: GatewayTarget::Augment,
+                    api_key: "sk-augment".into(),
+                    enabled: true,
+                },
+            ],
+        };
+
+        let updated = sync_legacy_codex_access_profile(profiles, Some("sk-new-default".into()));
+
+        let codex_profiles: Vec<_> = updated
+            .profiles
+            .iter()
+            .filter(|profile| profile.target == GatewayTarget::Codex)
+            .cloned()
+            .collect();
+
+        assert_eq!(codex_profiles.len(), 2);
+        assert_eq!(codex_profiles[0].id, "codex-default");
+        assert_eq!(codex_profiles[0].api_key, "sk-new-default");
+        assert_eq!(codex_profiles[1].id, "codex-user-a");
+        assert_eq!(
+            updated.first_enabled_api_key_for_target(GatewayTarget::Codex),
+            Some("sk-new-default".to_string())
+        );
     }
 }

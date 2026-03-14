@@ -46,7 +46,14 @@ fn unified_augment_routes(
     let models_route = unified_models_request_filter()
         .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
-            handle_augment_proxy("/v1/models".to_string(), Method::GET, query, headers, body, state)
+            handle_augment_proxy(
+                "/v1/models".to_string(),
+                Method::GET,
+                query,
+                headers,
+                body,
+                state,
+            )
         });
 
     let responses_route = unified_responses_request_filter()
@@ -330,6 +337,7 @@ pub(crate) async fn handle_unified_gateway_request(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
+    _gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
     state: Arc<AppState>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     handle_augment_proxy(
@@ -1024,9 +1032,8 @@ PY
                 write_fake_proxy_sidecar_binary(temp_dir.path()),
             )))),
         };
-        let route = unified_augment_routes(state.clone()).recover(
-            crate::core::api_server::handle_rejection,
-        );
+        let route = unified_augment_routes(state.clone())
+            .recover(crate::core::api_server::handle_rejection);
 
         let response = warp::test::request()
             .method("GET")
@@ -1038,9 +1045,6 @@ PY
 
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"]["type"], "no_augment_accounts");
-        assert_eq!(
-            body["error"]["message"],
-            "No available Augment accounts"
-        );
+        assert_eq!(body["error"]["message"], "No available Augment accounts");
     }
 }

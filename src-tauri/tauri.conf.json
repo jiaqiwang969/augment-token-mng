@@ -3,7 +3,7 @@
   "version": "1.9.7",
   "identifier": "com.cubezhao.atm",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node ./scripts/ensure-vite-dev.mjs",
     "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"

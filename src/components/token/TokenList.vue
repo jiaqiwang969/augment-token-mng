@@ -113,9 +113,9 @@
             </button>
           </div>
         </div>
-        <AugmentProxyPanel />
       </template>
       <!-- Page Body -->
+      <AugmentProxyPanel />
       <!-- Loading State -->
       <div v-if="isLoading" class="text-center py-12 px-6">
         <div class="spinner"></div>

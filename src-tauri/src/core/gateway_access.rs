@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 use tauri::Manager;
 
-use crate::platforms::openai::codex::pool::CodexServerConfig;
 use crate::AppState;
+use crate::platforms::openai::codex::pool::CodexServerConfig;
 
 const GATEWAY_ACCESS_PROFILES_FILE: &str = "gateway_access_profiles.json";
 const LEGACY_CODEX_CONFIG_FILE: &str = "openai_codex_config.json";
@@ -68,6 +68,42 @@ impl GatewayAccessProfiles {
         self.profiles
             .iter()
             .find(|profile| profile.enabled && profile.api_key.trim() == expected)
+    }
+
+    pub fn list_by_target(&self, target: GatewayTarget) -> Vec<GatewayAccessProfile> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.target == target)
+            .cloned()
+            .collect()
+    }
+
+    pub fn first_enabled_api_key_for_target(&self, target: GatewayTarget) -> Option<String> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.target == target && profile.enabled)
+            .find_map(|profile| {
+                let trimmed = profile.api_key.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+    }
+
+    pub fn upsert_profile(&mut self, profile: GatewayAccessProfile) {
+        if let Some(index) = self.profiles.iter().position(|item| item.id == profile.id) {
+            self.profiles[index] = profile;
+        } else {
+            self.profiles.push(profile);
+        }
+    }
+
+    pub fn remove_profile(&mut self, profile_id: &str) -> bool {
+        let before_len = self.profiles.len();
+        self.profiles.retain(|profile| profile.id != profile_id);
+        self.profiles.len() != before_len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -232,6 +268,121 @@ mod tests {
         };
 
         assert!(profiles.find_by_key("sk-disabled").is_none());
+    }
+
+    #[test]
+    fn gateway_access_resolves_any_enabled_matching_key_for_same_target() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-a".into(),
+                    name: "Codex A".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-codex-a".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "codex-b".into(),
+                    name: "Codex B".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-codex-b".into(),
+                    enabled: true,
+                },
+            ],
+        };
+
+        let profile = profiles.find_by_key("sk-codex-b").unwrap();
+
+        assert_eq!(profile.id, "codex-b");
+        assert_eq!(profile.target, GatewayTarget::Codex);
+    }
+
+    #[test]
+    fn gateway_access_returns_first_enabled_api_key_for_target() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-disabled".into(),
+                    name: "Codex Disabled".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-disabled".into(),
+                    enabled: false,
+                },
+                GatewayAccessProfile {
+                    id: "augment-default".into(),
+                    name: "Augment Default".into(),
+                    target: GatewayTarget::Augment,
+                    api_key: "sk-augment".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "codex-primary".into(),
+                    name: "Codex Primary".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "  sk-primary  ".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "codex-secondary".into(),
+                    name: "Codex Secondary".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-secondary".into(),
+                    enabled: true,
+                },
+            ],
+        };
+
+        assert_eq!(
+            profiles.first_enabled_api_key_for_target(GatewayTarget::Codex),
+            Some("sk-primary".to_string())
+        );
+        assert_eq!(
+            profiles.first_enabled_api_key_for_target(GatewayTarget::Augment),
+            Some("sk-augment".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_access_upsert_replaces_matching_id_without_dropping_other_profiles() {
+        let mut profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-default".into(),
+                    name: "Codex Default".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-old".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "codex-user-a".into(),
+                    name: "Alice".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-alice".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "augment-default".into(),
+                    name: "Augment Default".into(),
+                    target: GatewayTarget::Augment,
+                    api_key: "sk-augment".into(),
+                    enabled: true,
+                },
+            ],
+        };
+
+        profiles.upsert_profile(GatewayAccessProfile {
+            id: "codex-default".into(),
+            name: "Codex Default".into(),
+            target: GatewayTarget::Codex,
+            api_key: "sk-new".into(),
+            enabled: true,
+        });
+
+        let codex_profiles = profiles.list_by_target(GatewayTarget::Codex);
+        assert_eq!(codex_profiles.len(), 2);
+        assert_eq!(codex_profiles[0].api_key, "sk-new");
+        assert_eq!(codex_profiles[1].id, "codex-user-a");
+        assert_eq!(profiles.list_by_target(GatewayTarget::Augment).len(), 1);
     }
 
     #[test]

@@ -40,10 +40,10 @@
     </template>
 
     <div class="h-[80vh] overflow-hidden">
-      <div v-if="activeTab === 'overview'" class="h-full space-y-4 p-1">
+      <div v-if="activeTab === 'overview'" class="h-full space-y-4 overflow-y-auto p-1 pr-2">
         <div class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2 rounded-lg border border-border p-3">
-            <label class="label mb-0">{{ $t('platform.openai.codexDialog.serverUrl') }}</label>
+            <label class="label mb-0">{{ $t('platform.openai.codexDialog.localServerUrl') }}</label>
             <div class="flex gap-2">
               <input class="input font-mono" :value="accessConfig.serverUrl" readonly />
               <button
@@ -60,50 +60,122 @@
           </div>
 
           <div class="space-y-2 rounded-lg border border-border p-3">
-            <label class="label mb-0">
-              {{ $t('platform.openai.codexDialog.apiKey') }}
-              <span class="text-danger">*</span>
-            </label>
             <div class="flex gap-2">
-              <input
-                v-model="apiKeyInput"
-                :type="showApiKey ? 'text' : 'password'"
-                class="input font-mono"
-                :class="{ '!border-danger': !apiKeyInput?.trim() }"
-                :placeholder="$t('platform.openai.codexDialog.apiKeyPlaceholder')"
-              />
+              <div class="w-full">
+                <label class="label mb-0">{{ $t('platform.openai.codexDialog.publicServerUrl') }}</label>
+                <input class="input font-mono" :value="publicServerUrl" readonly />
+              </div>
               <button
-                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                v-tooltip="showApiKey ? $t('platform.openai.codexDialog.hideApiKey') : $t('platform.openai.codexDialog.showApiKey')"
-                @click="showApiKey = !showApiKey"
-              >
-                <svg v-if="showApiKey" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27z"/>
-                </svg>
-                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-                </svg>
-              </button>
-              <button
-                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                v-tooltip="$t('platform.openai.codexDialog.generateApiKey')"
-                @click="generateApiKey"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="3" width="18" height="18" rx="3"></rect>
-                  <path d="M12 8v8M8 12h8"></path>
-                </svg>
-              </button>
-              <button
-                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                class="btn btn--icon btn--ghost !mt-[22px] !h-[34px] !w-[34px] shrink-0"
                 v-tooltip="$t('common.copy')"
-                @click="copyText(apiKeyInput)"
+                @click="copyText(publicServerUrl)"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                 </svg>
               </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="space-y-3 rounded-lg border border-border p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <label class="label mb-0">{{ $t('platform.openai.codexDialog.gatewayKeys') }}</label>
+              <p class="mt-1 text-[12px] text-text-muted">
+                {{ $t('platform.openai.codexDialog.gatewayKeysHint') }}
+              </p>
+            </div>
+            <button class="btn btn--secondary btn--sm" :disabled="isCreatingProfile" @click="createGatewayProfile">
+              {{ $t('platform.openai.codexDialog.addKey') }}
+            </button>
+          </div>
+
+          <div v-if="gatewayProfiles.length === 0" class="rounded-lg border border-dashed border-border bg-muted/10 px-3 py-5 text-center text-[12px] text-text-muted">
+            {{ $t('platform.openai.codexDialog.noGatewayKeys') }}
+          </div>
+
+          <div v-else class="space-y-2">
+            <div
+              v-for="profile in gatewayProfiles"
+              :key="profile.id"
+              class="space-y-3 rounded-lg border border-border bg-muted/10 p-3"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-[13px] font-medium">{{ profile.name || profile.id }}</span>
+                  <span
+                    v-if="profile.isPrimary"
+                    class="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-medium text-primary"
+                  >
+                    {{ $t('platform.openai.codexDialog.primaryKey') }}
+                  </span>
+                  <span
+                    v-if="!profile.enabled"
+                    class="rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-medium text-danger"
+                  >
+                    {{ $t('platform.openai.codexDialog.disabledKey') }}
+                  </span>
+                </div>
+                <label class="flex items-center gap-2 text-[12px] text-text-secondary">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4"
+                    :checked="profile.enabled"
+                    :disabled="isProfileBusy(profile.id)"
+                    @change="toggleGatewayProfile(profile, $event.target.checked)"
+                  />
+                  <span>{{ profile.enabled ? $t('platform.openai.codexDialog.enabledKey') : $t('platform.openai.codexDialog.disabledKey') }}</span>
+                </label>
+              </div>
+
+              <div class="grid gap-2 xl:grid-cols-[220px_minmax(0,1fr)_auto]">
+                <input
+                  v-model="profile.name"
+                  class="input"
+                  :disabled="isProfileBusy(profile.id)"
+                  :placeholder="$t('platform.openai.codexDialog.profileNamePlaceholder')"
+                />
+
+                <div class="flex gap-2">
+                  <input
+                    v-model="profile.apiKey"
+                    :type="isProfileKeyVisible(profile.id) ? 'text' : 'password'"
+                    class="input font-mono"
+                    :disabled="isProfileBusy(profile.id)"
+                    :placeholder="$t('platform.openai.codexDialog.apiKeyPlaceholder')"
+                  />
+                  <button
+                    class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                    :disabled="isProfileBusy(profile.id)"
+                    v-tooltip="isProfileKeyVisible(profile.id) ? $t('platform.openai.codexDialog.hideApiKey') : $t('platform.openai.codexDialog.showApiKey')"
+                    @click="toggleProfileKeyVisibility(profile.id)"
+                  >
+                    <svg v-if="isProfileKeyVisible(profile.id)" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27z"/>
+                    </svg>
+                    <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+                    </svg>
+                  </button>
+                </div>
+
+                <div class="flex flex-wrap gap-2">
+                  <button class="btn btn--secondary btn--sm" :disabled="isProfileBusy(profile.id)" @click="saveGatewayProfile(profile)">
+                    {{ $t('platform.openai.codexDialog.saveKey') }}
+                  </button>
+                  <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="regenerateGatewayProfileKey(profile)">
+                    {{ $t('platform.openai.codexDialog.generateApiKey') }}
+                  </button>
+                  <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="copyText(profile.apiKey)">
+                    {{ $t('common.copy') }}
+                  </button>
+                  <button class="btn btn--ghost btn--sm text-danger" :disabled="isProfileBusy(profile.id)" @click="deleteGatewayProfile(profile)">
+                    {{ $t('common.delete') }}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -216,7 +288,7 @@
         </div>
 
         <!-- 月度趋势图 -->
-        <CodexUsageChart :loading="isLoadingChart" :chart-data="dailyStats" />
+        <CodexUsageChart :loading="isLoadingChart" :chart-data="dailyStatsSeries" />
       </div>
 
       <div v-else class="flex h-full flex-col gap-2 p-1">
@@ -377,8 +449,8 @@
     <CodexQuickSwitchModal
       v-if="showQuickSwitchModal"
       :type="showQuickSwitchModal"
-      :base-url="accessConfig.serverUrl + '/v1'"
-      :api-key="apiKeyInput"
+      :base-url="accessConfig.serverUrl"
+      :api-key="primaryGatewayApiKey"
       @close="showQuickSwitchModal = ''"
       @switched="showQuickSwitchModal = ''"
     />
@@ -386,7 +458,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -400,15 +472,15 @@ const { t: $t } = useI18n()
 
 const isLoading = ref(false)
 const isToggling = ref(false)
-const isSavingConfig = ref(false)
-const showApiKey = ref(false)
+const isCreatingProfile = ref(false)
 const activeTab = ref('overview')
 const showQuickSwitchModal = ref('') // 'codex' | 'droid' | ''
 const SHARED_PORT = 8766
+const publicServerUrl = 'https://lingkong.xyz/v1'
 
 const serverStatus = ref({ running: false, address: `http://127.0.0.1:${SHARED_PORT}`, port: SHARED_PORT, poolStatus: null })
 const accessConfig = ref({
-  serverUrl: `http://127.0.0.1:${SHARED_PORT}`,
+  serverUrl: `http://127.0.0.1:${SHARED_PORT}/v1`,
   apiKey: ''
 })
 const poolStatus = ref({
@@ -426,11 +498,17 @@ const poolStatus = ref({
 const periodStats = ref({ todayRequests: 0, todayTokens: 0, weekRequests: 0, weekTokens: 0, monthRequests: 0, monthTokens: 0 })
 const allTimeStats = ref({ requests: 0, tokens: 0 })
 
-const apiKeyInput = ref('')
+const gatewayProfiles = ref([])
+const profileBusyState = ref({})
+const visibleProfileKeys = ref({})
 const poolStrategy = ref('round-robin')
 const selectedAccountId = ref('')
 const isChangingStrategy = ref(false)
 const availableAccounts = ref([])
+const primaryGatewayApiKey = computed(() => {
+  const primary = gatewayProfiles.value.find(profile => profile.isPrimary)
+  return primary?.apiKey || accessConfig.value.apiKey || ''
+})
 
 const applyPoolStatus = (rawStatus) => {
   poolStatus.value = toCamel(rawStatus)
@@ -478,20 +556,9 @@ const logRange = ref('7d')
 
 // 图表相关状态
 const isLoadingChart = ref(false)
-const dailyStats = ref([])
+const dailyStatsSeries = ref([])
 
 let pollTimer = null
-let apiKeySaveTimer = null
-
-// 防抖保存 API Key
-const saveApiKeyDebounced = () => {
-  if (apiKeySaveTimer) {
-    clearTimeout(apiKeySaveTimer)
-  }
-  apiKeySaveTimer = setTimeout(() => {
-    saveAccessConfig()
-  }, 800)
-}
 
 const toCamel = (obj) => {
   if (Array.isArray(obj)) return obj.map(toCamel)
@@ -576,10 +643,57 @@ const randomBytesHex = (size = 20) => {
   return out
 }
 
-const generateApiKey = () => {
-  apiKeyInput.value = `sk-${randomBytesHex(24)}`
-  showApiKey.value = true
-  window.$notify?.success($t('platform.openai.codexDialog.generateApiKeySuccess'))
+const generateApiKeyValue = () => `sk-${randomBytesHex(24)}`
+
+const normalizeGatewayProfile = (profile) => {
+  const data = toCamel(profile)
+  return {
+    id: data.id || '',
+    name: data.name || '',
+    apiKey: data.apiKey || '',
+    enabled: data.enabled !== false,
+    isPrimary: !!data.isPrimary
+  }
+}
+
+const cleanupProfileMaps = (profiles) => {
+  const validIds = new Set(profiles.map(profile => profile.id))
+  const filterByIds = (source) =>
+    Object.fromEntries(Object.entries(source).filter(([id]) => validIds.has(id)))
+
+  profileBusyState.value = filterByIds(profileBusyState.value)
+  visibleProfileKeys.value = filterByIds(visibleProfileKeys.value)
+}
+
+const setProfileBusy = (profileId, busy) => {
+  const next = { ...profileBusyState.value }
+  if (busy) {
+    next[profileId] = true
+  } else {
+    delete next[profileId]
+  }
+  profileBusyState.value = next
+}
+
+const isProfileBusy = (profileId) => !!profileBusyState.value[profileId]
+
+const toggleProfileKeyVisibility = (profileId) => {
+  visibleProfileKeys.value = {
+    ...visibleProfileKeys.value,
+    [profileId]: !visibleProfileKeys.value[profileId]
+  }
+}
+
+const isProfileKeyVisible = (profileId) => !!visibleProfileKeys.value[profileId]
+
+const ensureGatewayProfileApiKey = (profile) => {
+  const apiKey = String(profile?.apiKey || '').trim()
+  if (apiKey) {
+    return apiKey
+  }
+
+  window.$notify?.error($t('platform.openai.codexDialog.apiKeyRequired'))
+  return null
 }
 
 const loadServerStatus = async () => {
@@ -597,10 +711,16 @@ const loadAccessConfig = async () => {
   const raw = await invoke('get_codex_access_config')
   const data = toCamel(raw)
   accessConfig.value = {
-    serverUrl: data.serverUrl || `http://127.0.0.1:${SHARED_PORT}`,
+    serverUrl: data.serverUrl || `http://127.0.0.1:${SHARED_PORT}/v1`,
     apiKey: data.apiKey || ''
   }
-  apiKeyInput.value = accessConfig.value.apiKey
+}
+
+const loadGatewayProfiles = async () => {
+  const raw = await invoke('list_codex_gateway_profiles')
+  const profiles = (Array.isArray(raw) ? raw : []).map(normalizeGatewayProfile)
+  gatewayProfiles.value = profiles
+  cleanupProfileMaps(profiles)
 }
 
 const loadPoolStatus = async () => {
@@ -626,6 +746,132 @@ const loadAccounts = async () => {
   } catch {
     availableAccounts.value = []
   }
+}
+
+const persistGatewayProfile = async (profile, { notifySuccess = false, successMessage = '' } = {}) => {
+  const apiKey = ensureGatewayProfileApiKey(profile)
+  if (!apiKey || !profile?.id) {
+    return null
+  }
+
+  setProfileBusy(profile.id, true)
+  try {
+    const updated = await invoke('update_codex_gateway_profile', {
+      profileId: profile.id,
+      name: profile.name,
+      apiKey,
+      enabled: profile.enabled
+    })
+    await Promise.all([loadGatewayProfiles(), loadAccessConfig()])
+
+    if (notifySuccess && successMessage) {
+      window.$notify?.success(successMessage)
+    }
+
+    return normalizeGatewayProfile(updated)
+  } finally {
+    setProfileBusy(profile.id, false)
+  }
+}
+
+const createGatewayProfile = async () => {
+  if (isCreatingProfile.value) {
+    return
+  }
+
+  isCreatingProfile.value = true
+  try {
+    const created = normalizeGatewayProfile(await invoke('create_codex_gateway_profile', {
+      name: null,
+      apiKey: null,
+      enabled: true
+    }))
+    await Promise.all([loadGatewayProfiles(), loadAccessConfig()])
+    visibleProfileKeys.value = {
+      ...visibleProfileKeys.value,
+      [created.id]: true
+    }
+    window.$notify?.success($t('platform.openai.codexDialog.createKeySuccess'))
+  } catch (error) {
+    console.error('Failed to create Codex gateway profile:', error)
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.createKeyFailed', { error: error?.message || error })
+    )
+  } finally {
+    isCreatingProfile.value = false
+  }
+}
+
+const saveGatewayProfile = async (profile) => {
+  try {
+    await persistGatewayProfile(profile, {
+      notifySuccess: true,
+      successMessage: $t('platform.openai.codexDialog.saveKeySuccess')
+    })
+  } catch (error) {
+    console.error('Failed to save Codex gateway profile:', error)
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.saveKeyFailed', { error: error?.message || error })
+    )
+  }
+}
+
+const toggleGatewayProfile = async (profile, enabled) => {
+  const previousEnabled = profile.enabled
+  profile.enabled = enabled
+
+  try {
+    const updated = await persistGatewayProfile(profile)
+    if (!updated) {
+      profile.enabled = previousEnabled
+    }
+  } catch (error) {
+    profile.enabled = previousEnabled
+    console.error('Failed to toggle Codex gateway profile:', error)
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.updateKeyFailed', { error: error?.message || error })
+    )
+  }
+}
+
+const deleteGatewayProfile = async (profile) => {
+  if (!profile?.id) {
+    return
+  }
+
+  const confirmed = window.confirm(
+    $t('platform.openai.codexDialog.deleteKeyConfirm', {
+      name: profile.name || profile.id
+    })
+  )
+  if (!confirmed) {
+    return
+  }
+
+  setProfileBusy(profile.id, true)
+  try {
+    await invoke('delete_codex_gateway_profile', {
+      profileId: profile.id
+    })
+    await Promise.all([loadGatewayProfiles(), loadAccessConfig()])
+    window.$notify?.success($t('platform.openai.codexDialog.deleteKeySuccess'))
+  } catch (error) {
+    console.error('Failed to delete Codex gateway profile:', error)
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.deleteKeyFailed', { error: error?.message || error })
+    )
+  } finally {
+    setProfileBusy(profile.id, false)
+  }
+}
+
+const regenerateGatewayProfileKey = (profile) => {
+  profile.apiKey = generateApiKeyValue()
+  visibleProfileKeys.value = {
+    ...visibleProfileKeys.value,
+    [profile.id]: true
+  }
+  window.$notify?.success($t('platform.openai.codexDialog.generateApiKeySuccess'))
 }
 
 const onStrategyChange = async () => {
@@ -739,10 +985,10 @@ const loadAllTimeStats = async () => {
 const loadDailyStats = async () => {
   isLoadingChart.value = true
   try {
-    const raw = await invoke('get_codex_daily_stats_from_storage', { days: 30 })
-    dailyStats.value = toCamel(raw).stats || []
+    const raw = await invoke('get_codex_daily_stats_by_gateway_profile_from_storage', { days: 30 })
+    dailyStatsSeries.value = toCamel(raw).series || []
   } catch {
-    dailyStats.value = []
+    dailyStatsSeries.value = []
   } finally {
     isLoadingChart.value = false
   }
@@ -783,31 +1029,8 @@ const nextLogPage = async () => {
   await loadLogs()
 }
 
-const saveAccessConfig = async () => {
-  if (isSavingConfig.value) return
-  isSavingConfig.value = true
-  try {
-    await invoke('set_codex_access_config', {
-      apiKey: apiKeyInput.value
-    })
-    accessConfig.value.apiKey = apiKeyInput.value
-  } catch (error) {
-    window.$notify?.error($t('platform.openai.codexDialog.saveConfigFailed', { error: error?.message || error }))
-  } finally {
-    isSavingConfig.value = false
-  }
-}
-
-// 监听 API Key 变化，自动保存
-watch(apiKeyInput, (newVal, oldVal) => {
-  if (newVal !== oldVal && newVal !== accessConfig.value.apiKey) {
-    saveApiKeyDebounced()
-  }
-})
-
 onMounted(async () => {
-  await Promise.all([loadServerStatus(), loadAccessConfig()])
-  await Promise.all([loadPoolStatus(), loadPeriodStats(), loadAllTimeStats(), loadLogs(), loadAccounts(), loadDailyStats()])
+  await refreshAllData({ refreshGatewayProfiles: true })
   pollTimer = window.setInterval(() => {
     refreshAllData()
   }, 1000)
@@ -817,10 +1040,6 @@ onBeforeUnmount(() => {
   if (pollTimer) {
     window.clearInterval(pollTimer)
     pollTimer = null
-  }
-  if (apiKeySaveTimer) {
-    clearTimeout(apiKeySaveTimer)
-    apiKeySaveTimer = null
   }
   if (modelFilterTimer) {
     clearTimeout(modelFilterTimer)
@@ -838,15 +1057,15 @@ const toggleServer = async () => {
       await invoke('start_codex_server', {
         config: {
           port: SHARED_PORT,
-          poolStrategy: 'round-robin',
+          poolStrategy: poolStrategy.value || 'round-robin',
           logRequests: true,
           maxLogEntries: 3000,
-          apiKey: apiKeyInput.value || null
+          apiKey: primaryGatewayApiKey.value || null
         }
       })
       window.$notify?.success($t('platform.openai.codexDialog.startSuccess'))
     }
-    await refreshAllData()
+    await refreshAllData({ refreshGatewayProfiles: true })
   } catch (error) {
     window.$notify?.error($t('platform.openai.codexDialog.toggleFailed', { error: error?.message || error }))
   } finally {
@@ -854,10 +1073,15 @@ const toggleServer = async () => {
   }
 }
 
-const refreshAllData = async ({ refreshPool = false } = {}) => {
+const refreshAllData = async ({ refreshPool = false, refreshGatewayProfiles = false } = {}) => {
   isLoading.value = true
   try {
-    await Promise.all([loadServerStatus(), loadAccessConfig()])
+    const topLevelTasks = [loadServerStatus(), loadAccessConfig()]
+    if (refreshGatewayProfiles) {
+      topLevelTasks.push(loadGatewayProfiles())
+    }
+
+    await Promise.all(topLevelTasks)
     if (refreshPool) {
       const refreshed = await invoke('refresh_codex_pool')
       applyPoolStatus(refreshed)
@@ -877,6 +1101,6 @@ const manualRefresh = async () => {
   } catch {
     // 忽略 flush 错误
   }
-  await refreshAllData({ refreshPool: true })
+  await refreshAllData({ refreshPool: true, refreshGatewayProfiles: true })
 }
 </script>

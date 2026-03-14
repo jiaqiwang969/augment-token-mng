@@ -28,8 +28,7 @@ fn build_cliproxy() {
     let script_path = repo_root.join("scripts").join("build-cliproxy.sh");
     let output_path = manifest_dir.join("resources").join("cliproxy-server");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS is not set");
-    let target_arch =
-        env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH is not set");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH is not set");
 
     if !script_path.exists() {
         panic!(

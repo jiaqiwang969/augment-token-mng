@@ -1,7 +1,14 @@
 <template>
-  <div class="rounded-lg border border-border bg-muted/10 p-3 h-[280px] flex flex-col">
-    <div class="flex justify-between items-center mb-2 shrink-0">
-      <h4 class="text-[13px] font-semibold text-text-secondary m-0">{{ $t('platform.openai.codexDialog.monthlyTrend') }}</h4>
+  <div class="flex h-[320px] flex-col rounded-lg border border-border bg-muted/10 p-3">
+    <div class="mb-2 flex shrink-0 items-center justify-between gap-3">
+      <div>
+        <h4 class="m-0 text-[13px] font-semibold text-text-secondary">
+          {{ $t('platform.openai.codexDialog.monthlyTrend') }}
+        </h4>
+        <p class="m-0 mt-1 text-[11px] text-text-muted">
+          {{ $t('platform.openai.codexDialog.monthlyTrendHint') }}
+        </p>
+      </div>
       <div class="flex items-center gap-3 text-[11px]">
         <button
           class="flex items-center gap-1 transition-opacity hover:opacity-70"
@@ -9,8 +16,8 @@
           @click="activeMetric = 'both'"
         >
           <span class="flex items-center gap-1">
-            <span class="w-2 h-2 rounded-full bg-[#4c6ef5]"></span>
-            <span class="w-2 h-2 rounded-full bg-[#f783ac]"></span>
+            <span class="h-2 w-3 rounded-full bg-[#4c6ef5]"></span>
+            <span class="h-2 w-3 rounded-full border border-[#4c6ef5] bg-transparent"></span>
           </span>
           {{ $t('platform.openai.codexDialog.requests') }}/{{ $t('platform.openai.codexDialog.tokens') }}
         </button>
@@ -19,7 +26,7 @@
           :class="activeMetric === 'requests' ? 'opacity-100' : 'opacity-40'"
           @click="activeMetric = 'requests'"
         >
-          <span class="w-2.5 h-2.5 rounded-full bg-[#4c6ef5]"></span>
+          <span class="h-2.5 w-2.5 rounded-full bg-[#4c6ef5]"></span>
           {{ $t('platform.openai.codexDialog.requests') }}
         </button>
         <button
@@ -27,24 +34,32 @@
           :class="activeMetric === 'tokens' ? 'opacity-100' : 'opacity-40'"
           @click="activeMetric = 'tokens'"
         >
-          <span class="w-2.5 h-2.5 rounded-full bg-[#f783ac]"></span>
+          <span class="h-2.5 w-2.5 rounded-full border border-[#4c6ef5] bg-transparent"></span>
           {{ $t('platform.openai.codexDialog.tokens') }}
         </button>
       </div>
     </div>
 
-    <div v-if="loading && !chartData" class="flex-1 flex flex-col items-center justify-center gap-2 text-text-muted">
+    <div
+      v-if="loading && !hasChartData"
+      class="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted"
+    >
       <span class="spinner spinner--sm"></span>
     </div>
 
-    <div v-else-if="!chartData || chartData.length === 0" class="flex-1 flex flex-col items-center justify-center gap-2 text-text-muted">
+    <div
+      v-else-if="!hasChartData"
+      class="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted"
+    >
       <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" class="opacity-50">
-        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
+        <path
+          d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"
+        />
       </svg>
       <p class="m-0 text-[12px]">{{ $t('platform.openai.codexDialog.noData') }}</p>
     </div>
 
-    <div v-else class="flex-1 min-h-0 relative">
+    <div v-else class="relative min-h-0 flex-1">
       <Line :key="chartKey" :data="lineChartData" :options="chartOptions" />
     </div>
   </div>
@@ -53,9 +68,33 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Line } from 'vue-chartjs'
-import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend } from 'chart.js'
+import { useI18n } from 'vue-i18n'
+import {
+  CategoryScale,
+  Chart as ChartJS,
+  Legend,
+  LineElement,
+  LinearScale,
+  PointElement,
+  Tooltip
+} from 'chart.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend)
+
+const { t: $t } = useI18n()
+
+const KEY_COLORS = [
+  '#4c6ef5',
+  '#f06595',
+  '#2f9e44',
+  '#f08c00',
+  '#7c3aed',
+  '#0ea5e9',
+  '#d6336c',
+  '#1d4ed8',
+  '#16a34a',
+  '#c2410c'
+]
 
 const props = defineProps({
   loading: {
@@ -68,8 +107,7 @@ const props = defineProps({
   }
 })
 
-const activeMetric = ref('both') // 'requests' | 'tokens' | 'both'
-
+const activeMetric = ref('requests')
 const chartKey = ref(0)
 const currentTheme = ref('light')
 
@@ -93,7 +131,6 @@ const themePalette = computed(() => {
   const isDark = theme === 'dark'
 
   return {
-    isDark,
     gridColor: resolveCssVar('--border', isDark ? '#404040' : '#e5e5e5'),
     legendColor: resolveCssVar('--text-secondary', isDark ? '#a3a3a3' : '#525252'),
     tooltipBg: resolveCssVar('--surface-elevated', isDark ? '#1f1f1f' : '#ffffff'),
@@ -106,10 +143,10 @@ const themePalette = computed(() => {
 const formatNumber = (v) => {
   const n = Number(v || 0)
   if (n < 1000) return n.toLocaleString()
-  if (n < 1000000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K'
-  if (n < 1000000000) return (n / 1000000).toFixed(2).replace(/\.00$/, '') + 'M'
-  if (n < 1000000000000) return (n / 1000000000).toFixed(2).replace(/\.00$/, '') + 'B'
-  return (n / 1000000000000).toFixed(2).replace(/\.00$/, '') + 'T'
+  if (n < 1000000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`
+  if (n < 1000000000) return `${(n / 1000000).toFixed(2).replace(/\.00$/, '')}M`
+  if (n < 1000000000000) return `${(n / 1000000000).toFixed(2).replace(/\.00$/, '')}B`
+  return `${(n / 1000000000000).toFixed(2).replace(/\.00$/, '')}T`
 }
 
 const formatLabel = (dateStr) => {
@@ -118,83 +155,79 @@ const formatLabel = (dateStr) => {
   return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
+const normalizedSeries = computed(() => {
+  if (!Array.isArray(props.chartData) || props.chartData.length === 0) {
+    return []
+  }
+
+  const hasSeriesShape = props.chartData.some(entry => Array.isArray(entry?.stats))
+  if (!hasSeriesShape) {
+    return [
+      {
+        profileId: 'all',
+        profileName: 'All Keys',
+        stats: props.chartData
+      }
+    ]
+  }
+
+  return props.chartData
+    .filter(entry => Array.isArray(entry?.stats))
+    .map((entry, index) => ({
+      profileId: entry.profileId || `profile-${index + 1}`,
+      profileName: entry.profileName || entry.name || `Key ${index + 1}`,
+      stats: entry.stats
+    }))
+})
+
+const labels = computed(() => {
+  const firstSeries = normalizedSeries.value.find(series => series.stats.length > 0)
+  return firstSeries ? firstSeries.stats.map(point => formatLabel(point.date)) : []
+})
+
+const hasChartData = computed(() =>
+  normalizedSeries.value.some(series =>
+    series.stats.some(point => Number(point.requests || 0) > 0 || Number(point.tokens || 0) > 0)
+  )
+)
+
+const buildDataset = (series, index, metric) => {
+  const color = KEY_COLORS[index % KEY_COLORS.length]
+  const isRequests = metric === 'requests'
+
+  return {
+    label: `${series.profileName} · ${isRequests ? $t('platform.openai.codexDialog.requests') : $t('platform.openai.codexDialog.tokens')}`,
+    data: series.stats.map(point => (isRequests ? point.requests || 0 : point.tokens || 0)),
+    yAxisID: isRequests ? 'yRequests' : 'yTokens',
+    borderColor: color,
+    backgroundColor: color,
+    borderWidth: 2,
+    borderDash: isRequests ? [] : [8, 5],
+    tension: 0.28,
+    pointRadius: 2,
+    pointHoverRadius: 5,
+    fill: false
+  }
+}
+
 const lineChartData = computed(() => {
-  if (!props.chartData || props.chartData.length === 0) {
+  if (!hasChartData.value) {
     return { labels: [], datasets: [] }
   }
 
-  const labels = props.chartData.map(d => formatLabel(d.date))
-  const requests = props.chartData.map(d => d.requests || 0)
-  const tokens = props.chartData.map(d => d.tokens || 0)
-
-  if (activeMetric.value === 'requests') {
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Requests',
-          data: requests,
-          yAxisID: 'yRequests',
-          borderColor: '#4c6ef5',
-          backgroundColor: '#4c6ef5',
-          borderWidth: 2,
-          tension: 0.3,
-          pointRadius: 2,
-          pointHoverRadius: 5,
-          fill: false
-        }
-      ]
+  const datasets = []
+  normalizedSeries.value.forEach((series, index) => {
+    if (activeMetric.value === 'requests' || activeMetric.value === 'both') {
+      datasets.push(buildDataset(series, index, 'requests'))
     }
-  }
-
-  if (activeMetric.value === 'tokens') {
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Tokens',
-          data: tokens,
-          yAxisID: 'yTokens',
-          borderColor: '#f783ac',
-          backgroundColor: '#f783ac',
-          borderWidth: 2,
-          tension: 0.3,
-          pointRadius: 2,
-          pointHoverRadius: 5,
-          fill: false
-        }
-      ]
+    if (activeMetric.value === 'tokens' || activeMetric.value === 'both') {
+      datasets.push(buildDataset(series, index, 'tokens'))
     }
-  }
+  })
 
   return {
-    labels,
-    datasets: [
-      {
-        label: 'Requests',
-        data: requests,
-        yAxisID: 'yRequests',
-        borderColor: '#4c6ef5',
-        backgroundColor: '#4c6ef5',
-        borderWidth: 2,
-        tension: 0.3,
-        pointRadius: 2,
-        pointHoverRadius: 5,
-        fill: false
-      },
-      {
-        label: 'Tokens',
-        data: tokens,
-        yAxisID: 'yTokens',
-        borderColor: '#f783ac',
-        backgroundColor: '#f783ac',
-        borderWidth: 2,
-        tension: 0.3,
-        pointRadius: 2,
-        pointHoverRadius: 5,
-        fill: false
-      }
-    ]
+    labels: labels.value,
+    datasets
   }
 })
 
@@ -218,7 +251,7 @@ const chartOptions = computed(() => {
         size: 10
       },
       precision: 0,
-      callback: (value) => {
+      callback: value => {
         if (value < 1) return ''
         return formatNumber(value)
       }
@@ -236,7 +269,20 @@ const chartOptions = computed(() => {
     },
     plugins: {
       legend: {
-        display: false
+        display: true,
+        position: 'top',
+        align: 'end',
+        labels: {
+          color: palette.legendColor,
+          boxWidth: 10,
+          boxHeight: 10,
+          usePointStyle: true,
+          pointStyle: 'line',
+          padding: 12,
+          font: {
+            size: 11
+          }
+        }
       },
       tooltip: {
         backgroundColor: palette.tooltipBg,
@@ -247,33 +293,15 @@ const chartOptions = computed(() => {
         padding: 10,
         displayColors: true,
         callbacks: {
-          title: (items) => {
+          title: items => {
             if (items.length > 0) {
               const index = items[0].dataIndex
-              const data = props.chartData[index]
-              if (data) {
-                return data.date
-              }
+              const firstSeries = normalizedSeries.value.find(series => series.stats[index])
+              return firstSeries?.stats[index]?.date || ''
             }
             return ''
           },
-          label: (context) => {
-            const index = context.dataIndex
-            const data = props.chartData[index]
-            if (!data) return ''
-
-            if (isRequests) {
-              return `Requests: ${formatNumber(data.requests)}`
-            }
-            if (isTokens) {
-              return `Tokens: ${formatNumber(data.tokens)}`
-            }
-
-            if (context.dataset?.label === 'Requests') {
-              return `Requests: ${formatNumber(data.requests)}`
-            }
-            return `Tokens: ${formatNumber(data.tokens)}`
-          }
+          label: context => `${context.dataset?.label || ''}: ${formatNumber(context.parsed?.y || 0)}`
         }
       }
     },
@@ -329,10 +357,18 @@ onUnmounted(() => {
 })
 
 watch(currentTheme, () => {
-  chartKey.value++
+  chartKey.value += 1
 })
 
 watch(activeMetric, () => {
-  chartKey.value++
+  chartKey.value += 1
 })
+
+watch(
+  () => props.chartData,
+  () => {
+    chartKey.value += 1
+  },
+  { deep: true }
+)
 </script>

@@ -286,6 +286,10 @@ pub struct RequestLog {
     pub error_message: Option<String>,
     #[serde(default)]
     pub request_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub gateway_profile_id: Option<String>,
+    #[serde(default)]
+    pub gateway_profile_name: Option<String>,
 }
 
 /// Token 统计数据
@@ -335,6 +339,18 @@ pub struct DailyStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyStatsResponse {
     pub stats: Vec<DailyStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDailyStatsSeries {
+    pub profile_id: String,
+    pub profile_name: String,
+    pub stats: Vec<DailyStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDailyStatsResponse {
+    pub series: Vec<GatewayDailyStatsSeries>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
