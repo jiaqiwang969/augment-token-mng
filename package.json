@@ -4,6 +4,7 @@
   "version": "1.9.7",
   "type": "module",
   "scripts": {
+    "build:cliproxy": "bash ./scripts/build-cliproxy.sh",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
