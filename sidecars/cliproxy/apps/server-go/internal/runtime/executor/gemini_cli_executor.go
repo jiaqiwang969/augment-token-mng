@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthcreds"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -33,10 +34,12 @@ import (
 )
 
 const (
-	codeAssistEndpoint      = "https://cloudcode-pa.googleapis.com"
-	codeAssistVersion       = "v1internal"
-	geminiOAuthClientID     = "REDACTED_GOOGLE_OAUTH_CLIENT_ID"
-	geminiOAuthClientSecret = "REDACTED_GOOGLE_OAUTH_CLIENT_SECRET"
+	codeAssistEndpoint = "https://cloudcode-pa.googleapis.com"
+	codeAssistVersion  = "v1internal"
+)
+
+var (
+	geminiOAuthClientID, geminiOAuthClientSecret = oauthcreds.GeminiCredentials(nil)
 )
 
 var geminiOAuthScopes = []string{
@@ -603,10 +606,11 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 			}
 		}
 	}
+	clientID, clientSecret := oauthcreds.GeminiCredentials(metadata)
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOAuthClientID,
-		ClientSecret: geminiOAuthClientSecret,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
 		Scopes:       geminiOAuthScopes,
 		Endpoint:     google.Endpoint,
 	}

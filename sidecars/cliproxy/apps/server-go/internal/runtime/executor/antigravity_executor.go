@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthcreds"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -44,12 +45,14 @@ const (
 	antigravityStreamPath          = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath        = "/v1internal:generateContent"
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = "REDACTED_GOOGLE_OAUTH_CLIENT_ID"
-	antigravityClientSecret        = "REDACTED_GOOGLE_OAUTH_CLIENT_SECRET"
 	defaultAntigravityAgent        = "antigravity/1.19.6 windows/amd64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "<identity> You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question. The USER will send you requests, which you must always prioritize addressing. Along with each USER request, we will attach additional metadata about their current state, such as what files they have open and where their cursor is. This information may or may not be relevant to the coding task, it is up for you to decide. </identity>"
+)
+
+var (
+	antigravityClientID, antigravityClientSecret = oauthcreds.AntigravityCredentials(nil)
 )
 
 var (
@@ -321,10 +324,10 @@ attemptLoop:
 
 			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if err := SanityCheckResponse(bodyBytes); err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
-	}
+			if err := SanityCheckResponse(bodyBytes); err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return cliproxyexecutor.Response{}, err
+			}
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
@@ -541,11 +544,11 @@ attemptLoop:
 					line = FilterSSEUsageMetadata(line)
 
 					payload := jsonPayload(line)
-		if err := SanityCheckStreamChunk(line); err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			out <- cliproxyexecutor.StreamChunk{Err: err}
-			continue
-		}
+					if err := SanityCheckStreamChunk(line); err != nil {
+						recordAPIResponseError(ctx, e.cfg, err)
+						out <- cliproxyexecutor.StreamChunk{Err: err}
+						continue
+					}
 					if payload == nil {
 						continue
 					}
@@ -938,11 +941,11 @@ attemptLoop:
 					line = FilterSSEUsageMetadata(line)
 
 					payload := jsonPayload(line)
-		if err := SanityCheckStreamChunk(line); err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			out <- cliproxyexecutor.StreamChunk{Err: err}
-			continue
-		}
+					if err := SanityCheckStreamChunk(line); err != nil {
+						recordAPIResponseError(ctx, e.cfg, err)
+						out <- cliproxyexecutor.StreamChunk{Err: err}
+						continue
+					}
 					if payload == nil {
 						continue
 					}
@@ -1164,7 +1167,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
-	
+
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
 
@@ -1344,10 +1347,11 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if refreshToken == "" {
 		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
 	}
+	clientID, clientSecret := oauthcreds.AntigravityCredentials(auth.Metadata)
 
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -1754,7 +1758,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	} else {
 		template, _ = sjson.Set(template, "project", generateProjectID())
 	}
-	
+
 	if isImageModel {
 		template, _ = sjson.Set(template, "requestId", generateImageGenRequestID())
 	} else {

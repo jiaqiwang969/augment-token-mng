@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthcreds"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -29,10 +30,10 @@ import (
 )
 
 // OAuth configuration constants for Gemini
-const (
-	ClientID            = "REDACTED_GOOGLE_OAUTH_CLIENT_ID"
-	ClientSecret        = "REDACTED_GOOGLE_OAUTH_CLIENT_SECRET"
-	DefaultCallbackPort = 8085
+const DefaultCallbackPort = 8085
+
+var (
+	ClientID, ClientSecret = oauthcreds.GeminiCredentials(nil)
 )
 
 // OAuth scopes for Gemini authentication

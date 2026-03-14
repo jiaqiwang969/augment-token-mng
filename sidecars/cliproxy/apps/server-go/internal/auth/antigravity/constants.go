@@ -1,11 +1,12 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
-// OAuth client credentials and configuration
-const (
-	ClientID     = "REDACTED_GOOGLE_OAUTH_CLIENT_ID"
-	ClientSecret = "REDACTED_GOOGLE_OAUTH_CLIENT_SECRET"
-	CallbackPort = 51121
+import "github.com/router-for-me/CLIProxyAPI/v6/internal/oauthcreds"
+
+const CallbackPort = 51121
+
+var (
+	ClientID, ClientSecret = oauthcreds.AntigravityCredentials(nil)
 )
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
