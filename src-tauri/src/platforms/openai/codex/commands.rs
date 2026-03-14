@@ -36,6 +36,8 @@ const CODEX_CONFIG_FILE: &str = "openai_codex_config.json";
 const SHARED_API_SERVER_PORT: u16 = 8766;
 const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 60;
 const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const CODEX_GATEWAY_PROFILE_ID: &str = "codex-default";
+const CODEX_GATEWAY_PROFILE_NAME: &str = "Codex Default";
 
 fn normalize_access_fields(config: &mut CodexServerConfig) {
     config.api_key = config.api_key.as_ref().and_then(|v| {
@@ -111,10 +113,7 @@ fn apply_fast_mode_to_codex_config_toml(
             toml::Value::String("fast".to_string()),
         );
         let mut features = toml::Table::new();
-        features.insert(
-            "fast_mode".to_string(),
-            toml::Value::Boolean(true),
-        );
+        features.insert("fast_mode".to_string(), toml::Value::Boolean(true));
         config.insert("features".to_string(), toml::Value::Table(features));
     } else {
         config.remove("service_tier");
@@ -123,8 +122,7 @@ fn apply_fast_mode_to_codex_config_toml(
 
     let content = toml::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config.toml: {}", e))?;
-    fs::write(&config_path, content)
-        .map_err(|e| format!("Failed to write config.toml: {}", e))?;
+    fs::write(&config_path, content).map_err(|e| format!("Failed to write config.toml: {}", e))?;
     Ok(())
 }
 
@@ -198,14 +196,59 @@ fn current_api_server_port(state: &AppState) -> u16 {
         .unwrap_or(SHARED_API_SERVER_PORT)
 }
 
+fn gateway_server_url(port: u16) -> String {
+    format!("http://127.0.0.1:{}/v1", port)
+}
+
+fn gateway_api_key_for_target(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    target: crate::core::gateway_access::GatewayTarget,
+) -> Result<Option<String>, String> {
+    let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)?;
+    Ok(profiles
+        .profiles
+        .into_iter()
+        .find(|profile| profile.target == target)
+        .and_then(|profile| {
+            let trimmed = profile.api_key.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }))
+}
+
+fn sync_codex_gateway_profile(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let mut profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)?;
+    profiles
+        .profiles
+        .retain(|profile| profile.target != crate::core::gateway_access::GatewayTarget::Codex);
+
+    if let Some(api_key) = api_key {
+        profiles
+            .profiles
+            .push(crate::core::gateway_access::GatewayAccessProfile {
+                id: CODEX_GATEWAY_PROFILE_ID.to_string(),
+                name: CODEX_GATEWAY_PROFILE_NAME.to_string(),
+                target: crate::core::gateway_access::GatewayTarget::Codex,
+                api_key,
+                enabled: true,
+            });
+    }
+
+    crate::core::gateway_access::set_gateway_access_profiles(app, state, profiles)?;
+    Ok(())
+}
+
 async fn apply_periodic_tasks(app: tauri::AppHandle, state: &AppState, config: &CodexServerConfig) {
     if config.enabled && config.quota_refresh_enabled {
-        start_periodic_quota_refresh(
-            app,
-            state,
-            config.quota_refresh_interval_seconds,
-        )
-        .await;
+        start_periodic_quota_refresh(app, state, config.quota_refresh_interval_seconds).await;
     } else {
         stop_periodic_quota_refresh().await;
     }
@@ -253,6 +296,11 @@ pub async fn init_codex_enabled_state_on_startup(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
+    if let Err(err) = crate::core::gateway_access::get_or_load_gateway_access_profiles(app, state)
+    {
+        eprintln!("Failed to initialize gateway access profiles: {}", err);
+    }
+
     let mut config = get_or_load_codex_config(app, state)?;
     normalize_access_fields(&mut config);
     normalize_server_port(&mut config);
@@ -503,8 +551,6 @@ pub async fn get_codex_model_stats(
     }
 }
 
-
-
 #[tauri::command]
 pub async fn clear_codex_logs(state: State<'_, AppState>) -> Result<(), String> {
     let logger = state.codex_logger.lock().unwrap().clone();
@@ -544,10 +590,7 @@ pub async fn set_codex_pool_strategy(
     }
 }
 
-
-
 #[tauri::command]
-
 
 pub async fn set_codex_selected_account(
     app: tauri::AppHandle,
@@ -573,13 +616,13 @@ pub async fn get_codex_access_config(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CodexAccessConfig, String> {
-    let config = get_or_load_codex_config(&app, state.inner())?;
     Ok(CodexAccessConfig {
-        server_url: format!(
-            "http://127.0.0.1:{}",
-            current_api_server_port(state.inner())
-        ),
-        api_key: config.api_key,
+        server_url: gateway_server_url(current_api_server_port(state.inner())),
+        api_key: gateway_api_key_for_target(
+            &app,
+            state.inner(),
+            crate::core::gateway_access::GatewayTarget::Codex,
+        )?,
     })
 }
 
@@ -596,12 +639,10 @@ pub async fn set_codex_access_config(
     normalize_runtime_fields(&mut config);
     *state.codex_server_config.lock().unwrap() = Some(config.clone());
     write_persisted_config(&app, &config)?;
+    sync_codex_gateway_profile(&app, state.inner(), config.api_key.clone())?;
 
     Ok(CodexAccessConfig {
-        server_url: format!(
-            "http://127.0.0.1:{}",
-            current_api_server_port(state.inner())
-        ),
+        server_url: gateway_server_url(current_api_server_port(state.inner())),
         api_key: config.api_key,
     })
 }
@@ -813,18 +854,19 @@ async fn start_periodic_quota_refresh(
             interval.tick().await;
             println!("[Codex] Starting periodic quota refresh...");
 
-            let accounts = match crate::platforms::openai::modules::storage::list_accounts(&app).await
-            {
-                Ok(accs) => accs,
-                Err(e) => {
-                    eprintln!("[Codex] Failed to list accounts for quota refresh: {}", e);
-                    continue;
-                }
-            };
+            let accounts =
+                match crate::platforms::openai::modules::storage::list_accounts(&app).await {
+                    Ok(accs) => accs,
+                    Err(e) => {
+                        eprintln!("[Codex] Failed to list accounts for quota refresh: {}", e);
+                        continue;
+                    }
+                };
 
             let mut refreshed = 0;
             for mut account in accounts {
-                if account.account_type == crate::platforms::openai::models::account::AccountType::API
+                if account.account_type
+                    == crate::platforms::openai::models::account::AccountType::API
                 {
                     continue;
                 }
@@ -853,12 +895,16 @@ async fn start_periodic_quota_refresh(
                         }
                     }
                     Err(e) => {
-                        eprintln!("[Codex] Failed to refresh quota for {}: {}", account.email, e);
+                        eprintln!(
+                            "[Codex] Failed to refresh quota for {}: {}",
+                            account.email, e
+                        );
                     }
                 }
             }
 
-            if let Ok(accounts) = crate::platforms::openai::modules::storage::list_accounts(&app).await
+            if let Ok(accounts) =
+                crate::platforms::openai::modules::storage::list_accounts(&app).await
             {
                 pool_ref.refresh_from_accounts(&accounts).await;
             }
@@ -878,5 +924,15 @@ async fn stop_periodic_quota_refresh() {
     if let Some(handle) = task.take() {
         handle.abort();
         println!("[Codex] Periodic quota refresh task stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_access_server_url_uses_unified_v1_base_url() {
+        assert_eq!(gateway_server_url(9123), "http://127.0.0.1:9123/v1");
     }
 }

@@ -77,22 +77,7 @@ impl AugmentSidecar {
             return false;
         }
 
-        let url = format!("{}/v1/models", self.base_url());
-        let client = reqwest::Client::new();
-
-        match client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(body) => models_payload_is_ready(body.as_ref()),
-                Err(_) => false,
-            },
-            _ => false,
-        }
+        probe_sidecar_health(&self.base_url(), &self.api_key).await
     }
 
     /// 同步强制停止 sidecar，用于退出路径
@@ -450,10 +435,7 @@ remote-management:
   allow-remote: false
   disable-control-panel: true
 "#,
-        port,
-        auth_dir,
-        api_key,
-        api_key,
+        port, auth_dir, api_key, api_key,
     )
 }
 
@@ -462,12 +444,12 @@ fn build_auth_file(token: &TokenData) -> Result<(String, String), String> {
         return Err("Missing access_token".to_string());
     }
 
-    let tenant_url = normalized_tenant_url(&token.tenant_url)
-        .ok_or_else(|| "Missing tenant_url".to_string())?;
+    let tenant_url =
+        normalized_tenant_url(&token.tenant_url).ok_or_else(|| "Missing tenant_url".to_string())?;
     let label =
         auth_label_for_tenant(&tenant_url).ok_or_else(|| "Invalid tenant_url".to_string())?;
-    let filename = auth_filename_for_tenant(&tenant_url)
-        .ok_or_else(|| "Invalid tenant_url".to_string())?;
+    let filename =
+        auth_filename_for_tenant(&tenant_url).ok_or_else(|| "Invalid tenant_url".to_string())?;
     let auth = json!({
         "type": AUGGIE_PROVIDER,
         "label": label,
@@ -542,15 +524,30 @@ fn sidecar_process_env(home_dir: &std::path::Path) -> Vec<(&'static str, PathBuf
     env
 }
 
+pub(crate) async fn probe_sidecar_health(base_url: &str, api_key: &str) -> bool {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+
+    match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(body) => models_payload_is_ready(body.as_ref()),
+            Err(_) => false,
+        },
+        _ => false,
+    }
+}
+
 fn split_windows_home_components(home_dir: &std::path::Path) -> Option<(String, String)> {
     let normalized = home_dir.to_string_lossy().replace('/', "\\");
     let bytes = normalized.as_bytes();
 
-    if bytes.len() < 3
-        || !bytes[0].is_ascii_alphabetic()
-        || bytes[1] != b':'
-        || bytes[2] != b'\\'
-    {
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
         return None;
     }
 
@@ -651,7 +648,8 @@ mod tests {
     #[test]
     fn sidecar_config_yaml_matches_cliproxy_contract() {
         let temp_dir = tempdir().unwrap();
-        let mut sidecar = AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+        let mut sidecar =
+            AugmentSidecar::new(temp_dir.path(), PathBuf::from("/tmp/cliproxy-server"));
         sidecar.port = 43123;
 
         sidecar.write_config().unwrap();
@@ -801,7 +799,10 @@ mod tests {
         let restored: SidecarRuntimeMetadata = serde_json::from_str(&raw).unwrap();
 
         assert_eq!(restored.pid, 43123);
-        assert_eq!(restored.config_path, PathBuf::from("/tmp/cliproxy_config.yaml"));
+        assert_eq!(
+            restored.config_path,
+            PathBuf::from("/tmp/cliproxy_config.yaml")
+        );
         assert_eq!(restored.binary_path, PathBuf::from("/tmp/cliproxy-server"));
     }
 

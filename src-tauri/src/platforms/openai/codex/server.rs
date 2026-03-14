@@ -7,12 +7,10 @@ use futures::{SinkExt, StreamExt};
 use hyper::{Body, Response};
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use warp::http::{HeaderMap, Method, StatusCode};
-use warp::path::FullPath;
 use warp::{Filter, Rejection, Reply};
 
 use super::{
@@ -161,15 +159,6 @@ pub fn codex_routes_from_state(
             }))
         });
 
-    // GET /v1/models
-    let models = warp::path!("v1" / "models")
-        .and(warp::get())
-        .and(state_filter.clone())
-        .and_then(|state: Arc<AppState>| async move {
-            ensure_codex_enabled(&state)?;
-            Result::<_, Rejection>::Ok(warp::reply::json(&get_models()))
-        });
-
     // GET /pool/status
     let pool_status = warp::path!("pool" / "status")
         .and(warp::get())
@@ -180,43 +169,44 @@ pub fn codex_routes_from_state(
             Result::<_, Rejection>::Ok(warp::reply::json(&pool.status().await))
         });
 
-    // 统一透传入口：仅处理 /v1/* 与 /backend-api/codex/*
-    let passthrough = warp::any()
-        .and(warp::path::full())
-        .and(warp::method())
-        .and(optional_raw_query())
-        .and(warp::header::headers_cloned())
-        .and(warp::body::content_length_limit(20 * 1024 * 1024))
-        .and(warp::body::bytes())
-        .and(state_filter)
-        .and_then(handle_passthrough);
-
-    health.or(models).or(pool_status).or(passthrough)
+    health.or(pool_status)
 }
 
-fn optional_raw_query() -> impl Filter<Extract = (Option<String>,), Error = Infallible> + Clone {
-    warp::query::raw()
-        .map(Some)
-        .or(warp::any().map(|| None))
-        .unify()
-}
-
-async fn handle_passthrough(
-    full_path: FullPath,
+pub(crate) async fn handle_unified_gateway_request(
+    path: String,
     method: Method,
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
     state: Arc<AppState>,
 ) -> Result<Box<dyn Reply>, Rejection> {
-    let path = full_path.as_str().to_string();
+    ensure_codex_enabled(&state)?;
+
+    if method == Method::GET && path == "/v1/models" {
+        return Ok(Box::new(warp::reply::json(&get_models())) as Box<dyn Reply>);
+    }
+
+    handle_passthrough_internal(path, method, query, headers, body, state, false).await
+}
+
+async fn handle_passthrough_internal(
+    path: String,
+    method: Method,
+    query: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+    state: Arc<AppState>,
+    validate_key_first: bool,
+) -> Result<Box<dyn Reply>, Rejection> {
     println!("[Codex Server] Incoming request: {} {}", method, path);
     if !is_supported_proxy_path(&path) {
         return Err(warp::reject::not_found());
     }
 
     ensure_codex_enabled(&state)?;
-    validate_api_key(&state, &headers)?;
+    if validate_key_first {
+        validate_api_key(&state, &headers)?;
+    }
 
     let (pool, executor, logger, storage) = get_runtime_or_reject(&state)?;
     let request_format = infer_request_format(&path).to_string();

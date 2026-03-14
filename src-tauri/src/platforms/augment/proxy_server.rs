@@ -1,6 +1,6 @@
 //! Augment API 代理路由
 //!
-//! 将 /augment/v1/* 请求转发到 CLIProxyAPI sidecar，实现 Codex CLI → Augment 的透明代理。
+//! 处理 Augment 后端代理请求，并将统一 /v1/* 流量转发到 CLIProxyAPI sidecar。
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -37,22 +37,70 @@ pub fn augment_routes_from_state(
     augment_routes(AugmentProxyState::from_app_state(&state))
 }
 
+#[cfg(test)]
+fn unified_augment_routes(
+    state: AugmentProxyState,
+) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+    let state_filter = warp::any().map(move || state.clone());
+
+    let models_route = unified_models_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy("/v1/models".to_string(), Method::GET, query, headers, body, state)
+        });
+
+    let responses_route = unified_responses_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy(
+                "/v1/responses".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    let chat_completions_route = unified_chat_completions_request_filter()
+        .and(state_filter)
+        .and_then(|query, headers, body, state| {
+            handle_augment_proxy(
+                "/v1/chat/completions".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    models_route.or(responses_route).or(chat_completions_route)
+}
+
 fn augment_routes(
     state: AugmentProxyState,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let state_filter = warp::any().map(move || state.clone());
 
-    let models_route = models_request_filter()
-        .and(state_filter.clone())
-        .and_then(|query, headers, body, state| {
-            handle_augment_proxy("/augment/v1/models", Method::GET, query, headers, body, state)
-        });
+    let models_route = models_request_filter().and(state_filter.clone()).and_then(
+        |query, headers, body, state| {
+            handle_augment_proxy(
+                "/augment/v1/models".to_string(),
+                Method::GET,
+                query,
+                headers,
+                body,
+                state,
+            )
+        },
+    );
 
     let responses_route = responses_request_filter()
         .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
             handle_augment_proxy(
-                "/augment/v1/responses",
+                "/augment/v1/responses".to_string(),
                 Method::POST,
                 query,
                 headers,
@@ -65,7 +113,7 @@ fn augment_routes(
         .and(state_filter)
         .and_then(|query, headers, body, state| {
             handle_augment_proxy(
-                "/augment/v1/chat/completions",
+                "/augment/v1/chat/completions".to_string(),
                 Method::POST,
                 query,
                 headers,
@@ -127,6 +175,29 @@ fn chat_completions_request_filter()
     proxy_post_request_filter(warp::path!("augment" / "v1" / "chat" / "completions"))
 }
 
+#[cfg(test)]
+fn unified_models_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path!("v1" / "models")
+        .and(warp::get())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .map(|query, headers| (query, headers, Bytes::new()))
+        .untuple_one()
+}
+
+#[cfg(test)]
+fn unified_responses_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    proxy_post_request_filter(warp::path!("v1" / "responses"))
+}
+
+#[cfg(test)]
+fn unified_chat_completions_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    proxy_post_request_filter(warp::path!("v1" / "chat" / "completions"))
+}
+
 fn proxy_post_request_filter<F>(
     path_filter: F,
 ) -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone
@@ -142,14 +213,14 @@ where
 }
 
 async fn handle_augment_proxy(
-    raw_path: &'static str,
+    raw_path: String,
     method: Method,
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
     state: AugmentProxyState,
 ) -> Result<Box<dyn Reply>, Rejection> {
-    let inner_path = inner_path(raw_path);
+    let inner_path = inner_path(&raw_path);
 
     println!(
         "[AugmentProxy] {} {} → sidecar {}",
@@ -253,6 +324,25 @@ async fn handle_augment_proxy(
     Ok(Box::new(response) as Box<dyn Reply>)
 }
 
+pub(crate) async fn handle_unified_gateway_request(
+    raw_path: String,
+    method: Method,
+    query: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+    state: Arc<AppState>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    handle_augment_proxy(
+        raw_path,
+        method,
+        query,
+        headers,
+        body,
+        AugmentProxyState::from_app_state(&state),
+    )
+    .await
+}
+
 fn build_streaming_response(
     status: StatusCode,
     headers: &HeaderMap,
@@ -315,7 +405,7 @@ async fn get_available_tokens(
     Ok(tokens.into_iter().filter(is_token_usable).collect())
 }
 
-fn is_token_usable(token: &crate::storage::TokenData) -> bool {
+pub(crate) fn is_token_usable(token: &crate::storage::TokenData) -> bool {
     !token.access_token.trim().is_empty()
         && !token.tenant_url.trim().is_empty()
         && !is_banned(token)
@@ -365,7 +455,11 @@ fn parse_portal_number(value: &serde_json::Value) -> Option<f64> {
         .as_f64()
         .or_else(|| value.as_i64().map(|value| value as f64))
         .or_else(|| value.as_u64().map(|value| value as f64))
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse::<f64>().ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|value| value.trim().parse::<f64>().ok())
+        })
 }
 
 fn parse_portal_expiry(value: &str) -> Option<chrono::DateTime<Utc>> {
@@ -614,11 +708,13 @@ mod tests {
 
     #[test]
     fn models_route_accepts_get_without_content_length() {
-        let route = models_request_filter().map(|query: Option<String>, _headers: HeaderMap, body: Bytes| {
-            assert_eq!(query, None);
-            assert!(body.is_empty());
-            warp::reply::with_status("ok", StatusCode::OK)
-        });
+        let route = models_request_filter().map(
+            |query: Option<String>, _headers: HeaderMap, body: Bytes| {
+                assert_eq!(query, None);
+                assert!(body.is_empty());
+                warp::reply::with_status("ok", StatusCode::OK)
+            },
+        );
 
         let response = futures::executor::block_on(async {
             warp::test::request()
@@ -634,11 +730,13 @@ mod tests {
 
     #[test]
     fn models_route_preserves_query_string_without_requiring_body() {
-        let route = models_request_filter().map(|query: Option<String>, _headers: HeaderMap, body: Bytes| {
-            assert_eq!(query.as_deref(), Some("limit=20"));
-            assert!(body.is_empty());
-            warp::reply::with_status("ok", StatusCode::OK)
-        });
+        let route = models_request_filter().map(
+            |query: Option<String>, _headers: HeaderMap, body: Bytes| {
+                assert_eq!(query.as_deref(), Some("limit=20"));
+                assert!(body.is_empty());
+                warp::reply::with_status("ok", StatusCode::OK)
+            },
+        );
 
         let response = futures::executor::block_on(async {
             warp::test::request()
@@ -653,9 +751,11 @@ mod tests {
 
     #[test]
     fn responses_route_requires_post() {
-        let route = responses_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
-            warp::reply::with_status("ok", StatusCode::OK)
-        });
+        let route = responses_request_filter().map(
+            |_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                warp::reply::with_status("ok", StatusCode::OK)
+            },
+        );
 
         let response = futures::executor::block_on(async {
             warp::test::request()
@@ -670,9 +770,11 @@ mod tests {
 
     #[test]
     fn chat_completions_route_requires_post() {
-        let route = chat_completions_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
-            warp::reply::with_status("ok", StatusCode::OK)
-        });
+        let route = chat_completions_request_filter().map(
+            |_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                warp::reply::with_status("ok", StatusCode::OK)
+            },
+        );
 
         let response = futures::executor::block_on(async {
             warp::test::request()
@@ -688,16 +790,22 @@ mod tests {
     #[test]
     fn augment_route_filters_do_not_match_management_path() {
         let route = models_request_filter()
-            .map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
-                warp::reply::with_status("models", StatusCode::OK)
-            })
-            .or(responses_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
-                warp::reply::with_status("responses", StatusCode::OK)
-            }))
+            .map(
+                |_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                    warp::reply::with_status("models", StatusCode::OK)
+                },
+            )
+            .or(responses_request_filter().map(
+                |_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                    warp::reply::with_status("responses", StatusCode::OK)
+                },
+            ))
             .unify()
-            .or(chat_completions_request_filter().map(|_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
-                warp::reply::with_status("chat", StatusCode::OK)
-            }))
+            .or(chat_completions_request_filter().map(
+                |_query: Option<String>, _headers: HeaderMap, _body: Bytes| {
+                    warp::reply::with_status("chat", StatusCode::OK)
+                },
+            ))
             .unify();
 
         let response = futures::executor::block_on(async {
@@ -861,15 +969,78 @@ PY
             .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()["content-type"],
-            "text/event-stream"
-        );
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
         assert_eq!(response.body(), "data: {\"ok\":true}\n\n");
 
         let mut guard = state.augment_sidecar.lock().await;
         if let Some(sidecar) = guard.as_mut() {
             sidecar.stop().await;
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn augment_unified_chat_route_uses_v1_path_without_public_prefix() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = unified_augment_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/v1/chat/completions?stream=false")
+            .header("authorization", "Bearer user-token")
+            .header("content-type", "application/json")
+            .body(r#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}"#)
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(payload["path"], "/v1/chat/completions?stream=false");
+
+        let authorization = payload["authorization"].as_str().unwrap();
+        assert!(authorization.starts_with("Bearer sk-atm-internal-"));
+        assert_ne!(authorization, "Bearer user-token");
+
+        let mut guard = state.augment_sidecar.lock().await;
+        if let Some(sidecar) = guard.as_mut() {
+            sidecar.stop().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn augment_unified_models_route_returns_503_without_available_accounts() {
+        let temp_dir = tempdir().unwrap();
+        let local_storage = Arc::new(LocalFileStorage::new_with_path(
+            temp_dir.path().join("proxy-test-empty-tokens.json"),
+        ));
+        let storage_manager = Arc::new(DualStorage::new(local_storage, None));
+        let state = AugmentProxyState {
+            storage_manager: Arc::new(Mutex::new(Some(storage_manager))),
+            augment_sidecar: Arc::new(tokio::sync::Mutex::new(Some(AugmentSidecar::new(
+                temp_dir.path(),
+                write_fake_proxy_sidecar_binary(temp_dir.path()),
+            )))),
+        };
+        let route = unified_augment_routes(state.clone()).recover(
+            crate::core::api_server::handle_rejection,
+        );
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "no_augment_accounts");
+        assert_eq!(
+            body["error"]["message"],
+            "No available Augment accounts"
+        );
     }
 }

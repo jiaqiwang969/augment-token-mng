@@ -15,6 +15,7 @@ pub mod features {
 pub mod core {
     pub mod api_server;
     pub mod app_commands;
+    pub mod gateway_access;
     pub mod http_client;
     pub mod path_manager;
     pub mod proxy_config;
@@ -95,6 +96,8 @@ pub struct AppState {
     pub codex_unsupported_params:
         Arc<crate::platforms::openai::codex::server::UnsupportedParamCache>,
     pub codex_server_config: Arc<Mutex<Option<CodexServerConfig>>>,
+    pub gateway_access_profiles:
+        Arc<Mutex<Option<crate::core::gateway_access::GatewayAccessProfiles>>>,
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
     // Augment API 代理 sidecar
@@ -143,7 +146,10 @@ mod tests {
         std::fs::write(&bundled_binary, b"bundled").unwrap();
         std::fs::create_dir_all(manifest_dir.path().join("resources")).unwrap();
         std::fs::write(
-            manifest_dir.path().join("resources").join("cliproxy-server"),
+            manifest_dir
+                .path()
+                .join("resources")
+                .join("cliproxy-server"),
             b"dev",
         )
         .unwrap();
@@ -162,7 +168,10 @@ mod tests {
     fn resolve_augment_sidecar_binary_falls_back_to_dev_resources() {
         let manifest_dir = tempdir().unwrap();
         let tmp_dir = tempdir().unwrap();
-        let dev_binary = manifest_dir.path().join("resources").join("cliproxy-server");
+        let dev_binary = manifest_dir
+            .path()
+            .join("resources")
+            .join("cliproxy-server");
         std::fs::create_dir_all(dev_binary.parent().unwrap()).unwrap();
         std::fs::write(&dev_binary, b"dev").unwrap();
 
@@ -208,7 +217,10 @@ mod tests {
         assert!(!temp_dir.path().join("cliproxy_runtime.json").exists());
 
         let guard = managed_sidecar.lock().await;
-        assert!(guard.as_ref().is_some(), "sidecar manager should stay registered");
+        assert!(
+            guard.as_ref().is_some(),
+            "sidecar manager should stay registered"
+        );
     }
 }
 
@@ -268,6 +280,7 @@ pub fn run() {
                     crate::platforms::openai::codex::server::UnsupportedParamCache::load(&app_data_dir),
                 ),
                 codex_server_config: Arc::new(Mutex::new(None)),
+                gateway_access_profiles: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
                 augment_sidecar: Arc::new(tokio::sync::Mutex::new({
@@ -510,6 +523,7 @@ pub fn run() {
                         codex_server: state.codex_server.clone(),
                         codex_unsupported_params: state.codex_unsupported_params.clone(),
                         codex_server_config: state.codex_server_config.clone(),
+                        gateway_access_profiles: state.gateway_access_profiles.clone(),
                         codex_log_storage: state.codex_log_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
                         augment_sidecar: state.augment_sidecar.clone(),
@@ -640,6 +654,9 @@ pub fn run() {
             // Augment 命令
             augment::generate_augment_auth_url,
             augment::get_augment_token,
+            augment::get_augment_proxy_status,
+            augment::get_augment_gateway_access_config,
+            augment::set_augment_gateway_access_config,
             augment::batch_check_tokens_status,
             augment::batch_check_tokens_status_simple,
             augment::fetch_batch_credit_consumption,
@@ -930,7 +947,10 @@ async fn wait_for_termination_signal() {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(signal) => signal,
             Err(err) => {
-                eprintln!("Failed to register SIGTERM handler, falling back to Ctrl+C: {}", err);
+                eprintln!(
+                    "Failed to register SIGTERM handler, falling back to Ctrl+C: {}",
+                    err
+                );
                 let _ = tokio::signal::ctrl_c().await;
                 return;
             }

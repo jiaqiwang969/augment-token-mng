@@ -1,4 +1,5 @@
 use crate::AppState;
+use bytes::Bytes;
 use crate::features::mail::outlook::OutlookManager;
 use crate::storage::{TokenData, TokenStorage};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use tauri::Emitter;
 use tauri::State;
 use tokio::sync::{Semaphore, oneshot};
 use uuid::Uuid;
+use warp::http::{HeaderMap, Method};
 use warp::{Filter, Rejection, Reply};
 
 // ==================== 数据结构定义 ====================
@@ -134,6 +136,7 @@ pub async fn start_api_server_cmd(
             codex_server: state.codex_server.clone(),
             codex_unsupported_params: state.codex_unsupported_params.clone(),
             codex_server_config: state.codex_server_config.clone(),
+            gateway_access_profiles: state.gateway_access_profiles.clone(),
             codex_log_storage: state.codex_log_storage.clone(),
             proxy_config: state.proxy_config.clone(),
             augment_sidecar: state.augment_sidecar.clone(),
@@ -188,7 +191,9 @@ pub async fn stop_api_server(
 }
 
 pub(crate) async fn stop_managed_augment_sidecar(
-    managed_sidecar: &tokio::sync::Mutex<Option<crate::platforms::augment::sidecar::AugmentSidecar>>,
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::augment::sidecar::AugmentSidecar>,
+    >,
 ) {
     let sidecar = {
         let mut guard = managed_sidecar.lock().await;
@@ -203,7 +208,9 @@ pub(crate) async fn stop_managed_augment_sidecar(
 }
 
 pub(crate) fn stop_managed_augment_sidecar_blocking(
-    managed_sidecar: &tokio::sync::Mutex<Option<crate::platforms::augment::sidecar::AugmentSidecar>>,
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::augment::sidecar::AugmentSidecar>,
+    >,
 ) {
     let mut guard = managed_sidecar.blocking_lock();
     if let Some(sidecar) = guard.as_mut() {
@@ -276,6 +283,187 @@ fn validate_session(session: &str) -> Result<(), String> {
         return Err("Session is too short".to_string());
     }
     Ok(())
+}
+
+fn optional_raw_query()
+-> impl Filter<Extract = (Option<String>,), Error = std::convert::Infallible> + Clone {
+    warp::query::raw()
+        .map(Some)
+        .or(warp::any().map(|| None))
+        .unify()
+}
+
+fn extract_gateway_bearer_token(header: &str) -> Option<&str> {
+    let trimmed = header.trim();
+    if trimmed.len() < 7 {
+        return None;
+    }
+
+    let (scheme, rest) = trimmed.split_at(7);
+    if !scheme.eq_ignore_ascii_case("bearer ") {
+        return None;
+    }
+
+    let token = rest.trim();
+    if token.is_empty() { None } else { Some(token) }
+}
+
+fn resolve_gateway_profile_from_profiles(
+    profiles: &crate::core::gateway_access::GatewayAccessProfiles,
+    headers: &HeaderMap,
+) -> Result<crate::core::gateway_access::GatewayAccessProfile, Rejection> {
+    let mut candidates: Vec<&str> = Vec::new();
+
+    if let Some(auth) = headers.get("authorization").and_then(|value| value.to_str().ok()) {
+        if let Some(token) = extract_gateway_bearer_token(auth) {
+            candidates.push(token);
+        }
+    }
+
+    if let Some(api_key) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        candidates.push(api_key);
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| profiles.find_by_key(candidate).cloned())
+        .ok_or_else(|| {
+            warp::reject::custom(
+                crate::platforms::openai::codex::server::CodexRejection::ExecutionError(
+                    "Unauthorized: invalid gateway API key".to_string(),
+                ),
+            )
+        })
+}
+
+fn resolve_gateway_profile(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<crate::core::gateway_access::GatewayAccessProfile, Rejection> {
+    let profiles = crate::core::gateway_access::get_or_load_gateway_access_profiles(
+        &state.app_handle,
+        state,
+    )
+    .map_err(|err| {
+        warp::reject::custom(crate::platforms::openai::codex::server::CodexRejection::InternalError(
+            format!("Failed to load gateway access profiles: {}", err),
+        ))
+    })?;
+
+    resolve_gateway_profile_from_profiles(&profiles, headers)
+}
+
+fn unified_models_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path!("v1" / "models")
+        .and(warp::get())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .map(|query, headers| (query, headers, Bytes::new()))
+        .untuple_one()
+}
+
+fn unified_responses_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "responses"))
+}
+
+fn unified_chat_completions_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "chat" / "completions"))
+}
+
+fn unified_post_request_filter<F>(
+    path_filter: F,
+) -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone
+where
+    F: Filter<Extract = (), Error = Rejection> + Clone + Send + Sync + 'static,
+{
+    path_filter
+        .and(warp::post())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .and(warp::body::content_length_limit(20 * 1024 * 1024))
+        .and(warp::body::bytes())
+}
+
+async fn handle_unified_gateway_request(
+    raw_path: String,
+    method: Method,
+    query: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+    state: Arc<AppState>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    let profile = resolve_gateway_profile(&state, &headers)?;
+
+    match profile.target {
+        crate::core::gateway_access::GatewayTarget::Codex => {
+            crate::platforms::openai::codex::server::handle_unified_gateway_request(
+                raw_path, method, query, headers, body, state,
+            )
+            .await
+        }
+        crate::core::gateway_access::GatewayTarget::Augment => {
+            crate::platforms::augment::proxy_server::handle_unified_gateway_request(
+                raw_path, method, query, headers, body, state,
+            )
+            .await
+        }
+    }
+}
+
+fn unified_gateway_routes_from_state(
+    state: Arc<AppState>,
+) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+    let state_filter = warp::any().map(move || state.clone());
+
+    let models_route =
+        unified_models_request_filter()
+            .and(state_filter.clone())
+            .and_then(|query, headers, body, state| {
+                handle_unified_gateway_request(
+                    "/v1/models".to_string(),
+                    Method::GET,
+                    query,
+                    headers,
+                    body,
+                    state,
+                )
+            });
+
+    let responses_route = unified_responses_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_unified_gateway_request(
+                "/v1/responses".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    let chat_completions_route = unified_chat_completions_request_filter()
+        .and(state_filter)
+        .and_then(|query, headers, body, state| {
+            handle_unified_gateway_request(
+                "/v1/chat/completions".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    models_route.or(responses_route).or(chat_completions_route)
 }
 
 // ==================== 路由处理器 ====================
@@ -768,13 +956,12 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
         .or(import_sessions_route)
         .boxed();
 
-    // Codex /v1/* 路由（复用同一个 HTTP 监听器）
+    // 统一 /v1/* 网关路由
+    let unified_gateway_routes = unified_gateway_routes_from_state(state.clone()).boxed();
+
+    // Codex 管理路由（健康检查、pool 状态）
     let codex_routes =
         crate::platforms::openai::codex::server::codex_routes_from_state(state.clone()).boxed();
-
-    // Augment /augment/* 代理路由
-    let augment_routes =
-        crate::platforms::augment::proxy_server::augment_routes_from_state(state).boxed();
 
     let cors = warp::cors()
         .allow_any_origin() // 允许任何来源（因为只监听 localhost）
@@ -789,7 +976,7 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
 
     // 组合所有路由
     let routes = api_routes
-        .or(augment_routes)
+        .or(unified_gateway_routes)
         .or(codex_routes)
         .with(cors)
         .recover(handle_rejection);
@@ -811,7 +998,7 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
 }
 
 /// 处理 warp 拒绝错误
-async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
+pub(crate) async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(_) = err.find::<warp::reject::MethodNotAllowed>() {
         let error_response = ApiErrorResponse {
             error: "Method not allowed".to_string(),
@@ -885,14 +1072,18 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             })),
             status,
         ))
-    } else if let Some(rej) = err.find::<crate::platforms::augment::proxy_server::AugmentProxyRejection>() {
+    } else if let Some(rej) =
+        err.find::<crate::platforms::augment::proxy_server::AugmentProxyRejection>()
+    {
         let (status, message, code) = match rej {
             crate::platforms::augment::proxy_server::AugmentProxyRejection::NoAccounts(msg) => (
                 warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 msg.as_str(),
                 "no_augment_accounts",
             ),
-            crate::platforms::augment::proxy_server::AugmentProxyRejection::SidecarNotReady(msg) => (
+            crate::platforms::augment::proxy_server::AugmentProxyRejection::SidecarNotReady(
+                msg,
+            ) => (
                 warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 msg.as_str(),
                 "sidecar_not_ready",
@@ -955,10 +1146,14 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::gateway_access::{
+        GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget,
+    };
     use crate::platforms::augment::sidecar::AugmentSidecar;
     use serde_json::Value;
     use std::path::PathBuf;
     use tempfile::tempdir;
+    use warp::http::HeaderMap;
     use warp::http::StatusCode;
 
     #[tokio::test]
@@ -972,7 +1167,9 @@ mod tests {
         stop_managed_augment_sidecar(&managed_sidecar).await;
 
         let guard = managed_sidecar.lock().await;
-        let sidecar = guard.as_ref().expect("sidecar manager should remain registered");
+        let sidecar = guard
+            .as_ref()
+            .expect("sidecar manager should remain registered");
         assert!(!sidecar.is_running());
     }
 
@@ -987,7 +1184,9 @@ mod tests {
         stop_managed_augment_sidecar_blocking(&managed_sidecar);
 
         let guard = managed_sidecar.blocking_lock();
-        let sidecar = guard.as_ref().expect("sidecar manager should remain registered");
+        let sidecar = guard
+            .as_ref()
+            .expect("sidecar manager should remain registered");
         assert!(!sidecar.is_running());
         assert!(sidecar.api_key().starts_with("sk-atm-internal-"));
     }
@@ -1042,5 +1241,109 @@ mod tests {
         assert_eq!(body["error"]["type"], "augment_upstream_error");
         assert_eq!(body["error"]["message"], "Failed to forward to sidecar");
         assert_eq!(body["error"]["code"], "502");
+    }
+
+    fn gateway_test_profiles() -> GatewayAccessProfiles {
+        GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-default".into(),
+                    name: "Codex Default".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-codex".into(),
+                    enabled: true,
+                },
+                GatewayAccessProfile {
+                    id: "augment-default".into(),
+                    name: "Augment Default".into(),
+                    target: GatewayTarget::Augment,
+                    api_key: "sk-augment".into(),
+                    enabled: true,
+                },
+            ],
+        }
+    }
+
+    fn build_unified_gateway_test_route(
+        profiles: GatewayAccessProfiles,
+    ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+        let profiles_filter = warp::any().map(move || profiles.clone());
+
+        warp::path!("v1" / "models")
+            .and(warp::get())
+            .and(warp::header::headers_cloned())
+            .and(profiles_filter)
+            .and_then(
+                |headers: HeaderMap, profiles: GatewayAccessProfiles| async move {
+                    let profile =
+                        resolve_gateway_profile_from_profiles(&profiles, &headers)?;
+                    match profile.target {
+                        GatewayTarget::Codex => Result::<_, Rejection>::Ok(
+                            warp::reply::json(&json!({"backend": "codex"})),
+                        ),
+                        GatewayTarget::Augment => Err(warp::reject::custom(
+                            crate::platforms::augment::proxy_server::AugmentProxyRejection::NoAccounts(
+                                "No available Augment accounts".to_string(),
+                            ),
+                        )),
+                    }
+                },
+            )
+            .recover(handle_rejection)
+    }
+
+    #[tokio::test]
+    async fn unified_gateway_routes_codex_key_to_codex_backend() {
+        let route = build_unified_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .header("authorization", "Bearer sk-codex")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["backend"], "codex");
+    }
+
+    #[tokio::test]
+    async fn unified_gateway_routes_augment_key_to_augment_backend() {
+        let route = build_unified_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .header("x-api-key", "sk-augment")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "no_augment_accounts");
+    }
+
+    #[tokio::test]
+    async fn unified_gateway_rejects_unknown_api_key() {
+        let route = build_unified_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .header("authorization", "Bearer sk-missing")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "unauthorized");
+        assert_eq!(
+            body["error"]["message"],
+            "Unauthorized: invalid gateway API key"
+        );
     }
 }
