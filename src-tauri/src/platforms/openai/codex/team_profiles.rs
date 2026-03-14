@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,22 +125,77 @@ pub fn import_team_template_into_profiles(
     for preset in team_profile_presets() {
         let preset_member_code = normalize_member_code(preset.member_code)
             .unwrap_or_else(|| preset.member_code.to_string());
-        if let Some(existing) = profiles.profiles.iter_mut().find(|profile| {
-            profile.target == GatewayTarget::Codex
-                && profile
-                    .member_code
-                    .as_deref()
-                    .and_then(normalize_member_code)
-                    == Some(preset_member_code.clone())
-        }) {
-            existing.name = preset.name.to_string();
-            existing.member_code = Some(preset.member_code.to_string());
-            existing.role_title = Some(preset.role_title.to_string());
-            existing.persona_summary = Some(preset.persona_summary.to_string());
-            existing.color = Some(preset.color.to_string());
+        let matching_indices: Vec<usize> = profiles
+            .profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| {
+                profile.target == GatewayTarget::Codex
+                    && profile
+                        .member_code
+                        .as_deref()
+                        .and_then(normalize_member_code)
+                        == Some(preset_member_code.clone())
+            })
+            .map(|(index, _)| index)
+            .collect();
 
-            if existing.api_key.trim().is_empty() {
-                existing.api_key = generate_team_gateway_api_key(preset.member_code);
+        if let Some((primary_index, duplicate_indices)) = matching_indices.split_first() {
+            let duplicate_profiles: Vec<GatewayAccessProfile> = duplicate_indices
+                .iter()
+                .map(|index| profiles.profiles[*index].clone())
+                .collect();
+
+            {
+                let existing = &mut profiles.profiles[*primary_index];
+                existing.name = preset.name.to_string();
+                existing.member_code = Some(preset.member_code.to_string());
+                existing.role_title = Some(preset.role_title.to_string());
+                existing.persona_summary = Some(preset.persona_summary.to_string());
+                existing.color = Some(preset.color.to_string());
+
+                if existing.api_key.trim().is_empty() {
+                    existing.api_key = duplicate_profiles
+                        .iter()
+                        .find_map(|profile| {
+                            let trimmed = profile.api_key.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        })
+                        .unwrap_or_else(|| generate_team_gateway_api_key(preset.member_code));
+                }
+
+                let existing_notes_empty = existing
+                    .notes
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty();
+                if existing_notes_empty {
+                    existing.notes = duplicate_profiles.iter().find_map(|profile| {
+                        profile.notes.as_ref().and_then(|notes| {
+                            let trimmed = notes.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        })
+                    });
+                }
+            }
+
+            if !duplicate_indices.is_empty() {
+                let duplicate_ids: HashSet<String> = duplicate_indices
+                    .iter()
+                    .map(|index| profiles.profiles[*index].id.clone())
+                    .collect();
+                profiles
+                    .profiles
+                    .retain(|profile| !duplicate_ids.contains(&profile.id));
             }
 
             continue;
@@ -201,5 +258,56 @@ mod tests {
         assert_eq!(jdd.id, "custom-jdd");
         assert_eq!(jdd.api_key, "sk-existing-jdd");
         assert_eq!(jdd.notes.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn import_team_template_removes_duplicate_profiles_for_same_member_code() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-jdd-primary".into(),
+                    name: "姜大大".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-primary".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: Some("keep".into()),
+                },
+                GatewayAccessProfile {
+                    id: "codex-jdd-duplicate".into(),
+                    name: "姜大大副本".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-duplicate".into(),
+                    enabled: true,
+                    member_code: Some(" J/D D ".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
+            ],
+        };
+
+        let imported = import_team_template_into_profiles(profiles);
+        let codex_profiles = imported.list_by_target(GatewayTarget::Codex);
+
+        assert_eq!(
+            codex_profiles
+                .iter()
+                .filter(|profile| profile.member_code.as_deref() == Some("jdd"))
+                .count(),
+            1
+        );
+
+        let jdd = codex_profiles
+            .iter()
+            .find(|profile| profile.member_code.as_deref() == Some("jdd"))
+            .unwrap();
+        assert_eq!(jdd.id, "codex-jdd-primary");
+        assert_eq!(jdd.api_key, "sk-primary");
+        assert_eq!(jdd.notes.as_deref(), Some("keep"));
     }
 }

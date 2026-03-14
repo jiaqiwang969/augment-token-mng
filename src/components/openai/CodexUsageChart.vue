@@ -176,9 +176,19 @@ const normalizedSeries = computed(() => {
     .map((entry, index) => ({
       profileId: entry.profileId || `profile-${index + 1}`,
       profileName: entry.profileName || entry.name || `Key ${index + 1}`,
+      memberCode: entry.memberCode || '',
+      roleTitle: entry.roleTitle || '',
+      color: entry.color || '',
       stats: entry.stats
     }))
 })
+
+const formatSeriesLabel = (series) => {
+  const parts = [series.profileName, series.memberCode, series.roleTitle]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+  return parts[0] ? parts.join(' · ') : series.profileName
+}
 
 const labels = computed(() => {
   const firstSeries = normalizedSeries.value.find(series => series.stats.length > 0)
@@ -192,11 +202,11 @@ const hasChartData = computed(() =>
 )
 
 const buildDataset = (series, index, metric) => {
-  const color = KEY_COLORS[index % KEY_COLORS.length]
+  const color = series.color || KEY_COLORS[index % KEY_COLORS.length]
   const isRequests = metric === 'requests'
 
   return {
-    label: `${series.profileName} · ${isRequests ? $t('platform.openai.codexDialog.requests') : $t('platform.openai.codexDialog.tokens')}`,
+    label: `${formatSeriesLabel(series)} · ${isRequests ? $t('platform.openai.codexDialog.requests') : $t('platform.openai.codexDialog.tokens')}`,
     data: series.stats.map(point => (isRequests ? point.requests || 0 : point.tokens || 0)),
     yAxisID: isRequests ? 'yRequests' : 'yTokens',
     borderColor: color,

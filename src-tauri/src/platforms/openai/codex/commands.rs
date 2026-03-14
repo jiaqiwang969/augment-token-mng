@@ -15,6 +15,10 @@ use super::models::{
     PeriodTokenStats, PoolStrategy, RequestLog, TokenStats,
 };
 use super::pool::{CodexServerConfig, CodexServerStatus};
+use super::team_profiles::{
+    TeamProfilePreset, generate_team_gateway_api_key, import_team_template_into_profiles,
+    normalize_member_code, team_profile_presets,
+};
 use crate::AppState;
 use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
 use crate::platforms::openai::codex::server::CodexServer;
@@ -42,6 +46,23 @@ pub struct CodexGatewayProfileEntry {
     pub api_key: String,
     pub enabled: bool,
     pub is_primary: bool,
+    pub member_code: Option<String>,
+    pub role_title: Option<String>,
+    pub persona_summary: Option<String>,
+    pub color: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexGatewayProfileMutation {
+    name: Option<String>,
+    api_key: Option<String>,
+    enabled: Option<bool>,
+    member_code: Option<String>,
+    role_title: Option<String>,
+    persona_summary: Option<String>,
+    color: Option<String>,
+    notes: Option<String>,
 }
 
 const CODEX_CONFIG_FILE: &str = "openai_codex_config.json";
@@ -228,12 +249,139 @@ fn generate_gateway_api_key() -> String {
     format!("sk-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+fn normalize_optional_gateway_field(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_gateway_member_code(member_code: Option<String>) -> Option<String> {
+    member_code.and_then(|value| normalize_member_code(&value))
+}
+
+fn team_profile_preset_for_member_code(member_code: Option<&str>) -> Option<TeamProfilePreset> {
+    let normalized = member_code.and_then(normalize_member_code)?;
+
+    team_profile_presets().iter().copied().find(|preset| {
+        normalize_member_code(preset.member_code).as_deref() == Some(normalized.as_str())
+    })
+}
+
+fn canonical_builtin_team_profile_id(
+    profiles: &GatewayAccessProfiles,
+    member_code: Option<&str>,
+) -> Option<String> {
+    let normalized = member_code.and_then(normalize_member_code)?;
+    if team_profile_preset_for_member_code(Some(normalized.as_str())).is_none() {
+        return None;
+    }
+
+    profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .find(|profile| {
+            profile
+                .member_code
+                .as_deref()
+                .and_then(normalize_member_code)
+                .as_deref()
+                == Some(normalized.as_str())
+        })
+        .map(|profile| profile.id)
+}
+
+fn profile_is_builtin_team_member(
+    profiles: &GatewayAccessProfiles,
+    profile: &GatewayAccessProfile,
+) -> bool {
+    canonical_builtin_team_profile_id(profiles, profile.member_code.as_deref()).as_deref()
+        == Some(profile.id.as_str())
+}
+
+fn generate_gateway_api_key_for_member_code(member_code: Option<&str>) -> String {
+    match member_code.and_then(normalize_member_code) {
+        Some(member_code) => generate_team_gateway_api_key(&member_code),
+        None => generate_gateway_api_key(),
+    }
+}
+
+fn ensure_unique_codex_member_code(
+    profiles: &GatewayAccessProfiles,
+    member_code: Option<&str>,
+    ignored_profile_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let normalized = member_code.and_then(normalize_member_code);
+    let Some(expected) = normalized.clone() else {
+        return Ok(None);
+    };
+
+    let has_conflict = profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .any(|profile| {
+            ignored_profile_id != Some(profile.id.as_str())
+                && profile
+                    .member_code
+                    .as_deref()
+                    .and_then(normalize_member_code)
+                    .as_deref()
+                    == Some(expected.as_str())
+        });
+
+    if has_conflict {
+        Err(format!(
+            "Codex gateway member code already exists: {}",
+            expected
+        ))
+    } else {
+        Ok(Some(expected))
+    }
+}
+
 fn default_codex_gateway_profile_name(profiles: &GatewayAccessProfiles) -> String {
     let next_index = profiles
         .list_by_target(GatewayTarget::Codex)
         .len()
         .saturating_add(1);
     format!("{} {}", CODEX_GATEWAY_PROFILE_NAME_PREFIX, next_index)
+}
+
+fn codex_gateway_profile_entry(
+    profile: GatewayAccessProfile,
+    primary_profile_id: Option<&str>,
+) -> CodexGatewayProfileEntry {
+    let GatewayAccessProfile {
+        id,
+        name,
+        api_key,
+        enabled,
+        member_code,
+        role_title,
+        persona_summary,
+        color,
+        notes,
+        ..
+    } = profile;
+
+    CodexGatewayProfileEntry {
+        is_primary: primary_profile_id
+            .map(|expected| expected == id)
+            .unwrap_or(false),
+        id,
+        name,
+        api_key: api_key.trim().to_string(),
+        enabled,
+        member_code,
+        role_title,
+        persona_summary,
+        color,
+        notes,
+    }
 }
 
 fn codex_gateway_profiles(profiles: &GatewayAccessProfiles) -> Vec<CodexGatewayProfileEntry> {
@@ -250,21 +398,193 @@ fn codex_gateway_profiles(profiles: &GatewayAccessProfiles) -> Vec<CodexGatewayP
     profiles
         .list_by_target(GatewayTarget::Codex)
         .into_iter()
-        .map(|profile| {
-            let profile_id = profile.id.clone();
-            let trimmed_key = profile.api_key.trim().to_string();
-            CodexGatewayProfileEntry {
-                id: profile_id.clone(),
-                name: profile.name,
-                api_key: trimmed_key.clone(),
-                enabled: profile.enabled,
-                is_primary: primary_profile_id
-                    .as_deref()
-                    .map(|expected| expected == profile_id)
-                    .unwrap_or(false),
-            }
-        })
+        .map(|profile| codex_gateway_profile_entry(profile, primary_profile_id.as_deref()))
         .collect()
+}
+
+fn codex_gateway_profile_entry_by_id(
+    profiles: &GatewayAccessProfiles,
+    profile_id: &str,
+) -> Result<CodexGatewayProfileEntry, String> {
+    codex_gateway_profiles(profiles)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| format!("Codex gateway profile not found: {}", profile_id))
+}
+
+fn codex_gateway_profile_by_id(
+    profiles: &GatewayAccessProfiles,
+    profile_id: &str,
+) -> Result<GatewayAccessProfile, String> {
+    profiles
+        .list_by_target(GatewayTarget::Codex)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| format!("Codex gateway profile not found: {}", profile_id))
+}
+
+fn import_codex_team_template_profiles(profiles: GatewayAccessProfiles) -> GatewayAccessProfiles {
+    import_team_template_into_profiles(profiles)
+}
+
+fn create_codex_gateway_profile_in_profiles(
+    profiles: &mut GatewayAccessProfiles,
+    mutation: CodexGatewayProfileMutation,
+) -> Result<GatewayAccessProfile, String> {
+    let member_code =
+        ensure_unique_codex_member_code(profiles, mutation.member_code.as_deref(), None)?;
+    let entry = GatewayAccessProfile {
+        id: format!("codex-{}", Uuid::new_v4().simple()),
+        name: normalize_gateway_profile_name(mutation.name)
+            .unwrap_or_else(|| default_codex_gateway_profile_name(profiles)),
+        target: GatewayTarget::Codex,
+        api_key: normalize_gateway_api_key(mutation.api_key)
+            .unwrap_or_else(|| generate_gateway_api_key_for_member_code(member_code.as_deref())),
+        enabled: mutation.enabled.unwrap_or(true),
+        member_code,
+        role_title: normalize_optional_gateway_field(mutation.role_title),
+        persona_summary: normalize_optional_gateway_field(mutation.persona_summary),
+        color: normalize_optional_gateway_field(mutation.color),
+        notes: normalize_optional_gateway_field(mutation.notes),
+    };
+
+    profiles.upsert_profile(entry.clone());
+    Ok(entry)
+}
+
+fn update_codex_gateway_profile_in_profiles(
+    profiles: &mut GatewayAccessProfiles,
+    profile_id: &str,
+    mutation: CodexGatewayProfileMutation,
+) -> Result<GatewayAccessProfile, String> {
+    let mut existing = codex_gateway_profile_by_id(profiles, profile_id)?;
+    let builtin_preset = if profile_is_builtin_team_member(profiles, &existing) {
+        team_profile_preset_for_member_code(existing.member_code.as_deref())
+    } else {
+        None
+    };
+    let current_member_code = existing
+        .member_code
+        .as_deref()
+        .and_then(normalize_member_code);
+
+    if let Some(name_input) = mutation.name {
+        if let Some(preset) = builtin_preset {
+            let trimmed = name_input.trim();
+            if !trimmed.is_empty() && trimmed != preset.name {
+                return Err(
+                    "Built-in team member name is fixed; use reset to restore defaults".to_string(),
+                );
+            }
+        } else if let Some(name) = normalize_gateway_profile_name(Some(name_input)) {
+            existing.name = name;
+        }
+    }
+
+    if let Some(api_key_input) = mutation.api_key {
+        existing.api_key = normalize_gateway_api_key(Some(api_key_input))
+            .ok_or_else(|| "Codex gateway API key cannot be empty".to_string())?;
+    }
+
+    if let Some(enabled) = mutation.enabled {
+        existing.enabled = enabled;
+    }
+
+    if let Some(member_code_input) = mutation.member_code {
+        let normalized_member_code = normalize_gateway_member_code(Some(member_code_input));
+        if let Some(preset) = builtin_preset {
+            let preset_member_code = normalize_member_code(preset.member_code)
+                .unwrap_or_else(|| preset.member_code.to_string());
+            if normalized_member_code.as_deref() != Some(preset_member_code.as_str()) {
+                return Err(
+                    "Built-in team member code is fixed; create a custom profile instead"
+                        .to_string(),
+                );
+            }
+        }
+        if normalized_member_code != current_member_code {
+            ensure_unique_codex_member_code(
+                profiles,
+                normalized_member_code.as_deref(),
+                Some(existing.id.as_str()),
+            )?;
+        }
+        existing.member_code = normalized_member_code;
+    }
+
+    if mutation.role_title.is_some() {
+        existing.role_title = normalize_optional_gateway_field(mutation.role_title);
+    }
+    if mutation.persona_summary.is_some() {
+        existing.persona_summary = normalize_optional_gateway_field(mutation.persona_summary);
+    }
+    if mutation.color.is_some() {
+        existing.color = normalize_optional_gateway_field(mutation.color);
+    }
+    if mutation.notes.is_some() {
+        existing.notes = normalize_optional_gateway_field(mutation.notes);
+    }
+
+    let updated_id = existing.id.clone();
+    profiles.upsert_profile(existing.clone());
+
+    codex_gateway_profile_by_id(profiles, &updated_id)
+}
+
+fn regenerate_codex_gateway_profile_api_key_in_profiles(
+    profiles: &mut GatewayAccessProfiles,
+    profile_id: &str,
+) -> Result<GatewayAccessProfile, String> {
+    let mut existing = codex_gateway_profile_by_id(profiles, profile_id)?;
+    existing.api_key = generate_gateway_api_key_for_member_code(existing.member_code.as_deref());
+    let updated_id = existing.id.clone();
+    profiles.upsert_profile(existing);
+
+    codex_gateway_profile_by_id(profiles, &updated_id)
+}
+
+fn reset_codex_gateway_profile_to_team_defaults_in_profiles(
+    profiles: &mut GatewayAccessProfiles,
+    profile_id: &str,
+) -> Result<GatewayAccessProfile, String> {
+    let mut existing = codex_gateway_profile_by_id(profiles, profile_id)?;
+    let preset =
+        team_profile_preset_for_member_code(existing.member_code.as_deref()).ok_or_else(|| {
+            "Only built-in team members can be reset to template defaults".to_string()
+        })?;
+
+    existing.name = preset.name.to_string();
+    existing.enabled = true;
+    existing.member_code = Some(preset.member_code.to_string());
+    existing.role_title = Some(preset.role_title.to_string());
+    existing.persona_summary = Some(preset.persona_summary.to_string());
+    existing.color = Some(preset.color.to_string());
+    existing.notes = None;
+
+    if existing.api_key.trim().is_empty() {
+        existing.api_key = generate_team_gateway_api_key(preset.member_code);
+    }
+
+    let updated_id = existing.id.clone();
+    profiles.upsert_profile(existing);
+
+    codex_gateway_profile_by_id(profiles, &updated_id)
+}
+
+fn delete_codex_gateway_profile_in_profiles(
+    profiles: &mut GatewayAccessProfiles,
+    profile_id: &str,
+) -> Result<(), String> {
+    let profile = codex_gateway_profile_by_id(profiles, profile_id)?;
+    if profile_is_builtin_team_member(profiles, &profile) {
+        return Err("Built-in team members cannot be deleted; disable them instead".to_string());
+    }
+
+    if profiles.remove_profile(profile_id) {
+        Ok(())
+    } else {
+        Err(format!("Codex gateway profile not found: {}", profile_id))
+    }
 }
 
 fn gateway_api_key_for_target(
@@ -758,33 +1078,35 @@ pub async fn create_codex_gateway_profile(
     name: Option<String>,
     api_key: Option<String>,
     enabled: Option<bool>,
+    member_code: Option<String>,
+    role_title: Option<String>,
+    persona_summary: Option<String>,
+    color: Option<String>,
+    notes: Option<String>,
 ) -> Result<CodexGatewayProfileEntry, String> {
     let mut profiles =
         crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
 
-    let entry = GatewayAccessProfile {
-        id: format!("codex-{}", Uuid::new_v4().simple()),
-        name: normalize_gateway_profile_name(name)
-            .unwrap_or_else(|| default_codex_gateway_profile_name(&profiles)),
-        target: GatewayTarget::Codex,
-        api_key: normalize_gateway_api_key(api_key).unwrap_or_else(generate_gateway_api_key),
-        enabled: enabled.unwrap_or(true),
-        member_code: None,
-        role_title: None,
-        persona_summary: None,
-        color: None,
-        notes: None,
-    };
+    let entry = create_codex_gateway_profile_in_profiles(
+        &mut profiles,
+        CodexGatewayProfileMutation {
+            name,
+            api_key,
+            enabled,
+            member_code,
+            role_title,
+            persona_summary,
+            color,
+            notes,
+        },
+    )?;
     let created_id = entry.id.clone();
-    profiles.upsert_profile(entry);
 
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
-    codex_gateway_profiles(&profiles)
-        .into_iter()
-        .find(|profile| profile.id == created_id)
-        .ok_or_else(|| "Failed to load created Codex gateway profile".to_string())
+    codex_gateway_profile_entry_by_id(&profiles, &created_id)
+        .map_err(|_| "Failed to load created Codex gateway profile".to_string())
 }
 
 #[tauri::command]
@@ -795,38 +1117,84 @@ pub async fn update_codex_gateway_profile(
     name: Option<String>,
     api_key: Option<String>,
     enabled: Option<bool>,
+    member_code: Option<String>,
+    role_title: Option<String>,
+    persona_summary: Option<String>,
+    color: Option<String>,
+    notes: Option<String>,
 ) -> Result<CodexGatewayProfileEntry, String> {
     let mut profiles =
         crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
-    let mut existing = profiles
-        .list_by_target(GatewayTarget::Codex)
-        .into_iter()
-        .find(|profile| profile.id == profile_id)
-        .ok_or_else(|| format!("Codex gateway profile not found: {}", profile_id))?;
-
-    if let Some(name) = normalize_gateway_profile_name(name) {
-        existing.name = name;
-    }
-
-    if let Some(api_key) = api_key {
-        existing.api_key = normalize_gateway_api_key(Some(api_key))
-            .ok_or_else(|| "Codex gateway API key cannot be empty".to_string())?;
-    }
-
-    if let Some(enabled) = enabled {
-        existing.enabled = enabled;
-    }
-
-    let updated_id = existing.id.clone();
-    profiles.upsert_profile(existing);
+    let updated = update_codex_gateway_profile_in_profiles(
+        &mut profiles,
+        &profile_id,
+        CodexGatewayProfileMutation {
+            name,
+            api_key,
+            enabled,
+            member_code,
+            role_title,
+            persona_summary,
+            color,
+            notes,
+        },
+    )?;
+    let updated_id = updated.id.clone();
 
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
-    codex_gateway_profiles(&profiles)
-        .into_iter()
-        .find(|profile| profile.id == updated_id)
-        .ok_or_else(|| "Failed to load updated Codex gateway profile".to_string())
+    codex_gateway_profile_entry_by_id(&profiles, &updated_id)
+        .map_err(|_| "Failed to load updated Codex gateway profile".to_string())
+}
+
+#[tauri::command]
+pub async fn import_codex_team_template(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexGatewayProfileEntry>, String> {
+    let profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    let profiles = import_codex_team_template_profiles(profiles);
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    Ok(codex_gateway_profiles(&profiles))
+}
+
+#[tauri::command]
+pub async fn regenerate_codex_gateway_profile_api_key(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<CodexGatewayProfileEntry, String> {
+    let mut profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    let updated = regenerate_codex_gateway_profile_api_key_in_profiles(&mut profiles, &profile_id)?;
+    let updated_id = updated.id.clone();
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    codex_gateway_profile_entry_by_id(&profiles, &updated_id)
+        .map_err(|_| "Failed to load regenerated Codex gateway profile".to_string())
+}
+
+#[tauri::command]
+pub async fn reset_codex_gateway_profile_to_team_defaults(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<CodexGatewayProfileEntry, String> {
+    let mut profiles =
+        crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
+    let updated =
+        reset_codex_gateway_profile_to_team_defaults_in_profiles(&mut profiles, &profile_id)?;
+    let updated_id = updated.id.clone();
+    let profiles =
+        crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
+    sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    codex_gateway_profile_entry_by_id(&profiles, &updated_id)
+        .map_err(|_| "Failed to load reset Codex gateway profile".to_string())
 }
 
 #[tauri::command]
@@ -837,9 +1205,7 @@ pub async fn delete_codex_gateway_profile(
 ) -> Result<(), String> {
     let mut profiles =
         crate::core::gateway_access::get_or_load_gateway_access_profiles(&app, state.inner())?;
-    if !profiles.remove_profile(&profile_id) {
-        return Err(format!("Codex gateway profile not found: {}", profile_id));
-    }
+    delete_codex_gateway_profile_in_profiles(&mut profiles, &profile_id)?;
 
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
@@ -1255,5 +1621,236 @@ mod tests {
         assert_eq!(jdd.name, "姜大大");
         assert_eq!(jdd.role_title.as_deref(), Some("产品与方法论"));
         assert!(jdd.api_key.starts_with("sk-team-jdd-"));
+    }
+
+    #[test]
+    fn codex_team_import_creates_ten_profiles_without_duplicates() {
+        let imported = import_codex_team_template_profiles(GatewayAccessProfiles::default());
+        let imported = import_codex_team_template_profiles(imported);
+        let codex_profiles = imported.list_by_target(GatewayTarget::Codex);
+
+        assert_eq!(codex_profiles.len(), 10);
+        assert_eq!(
+            codex_profiles
+                .iter()
+                .filter(|profile| profile.member_code.as_deref() == Some("jdd"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            codex_profiles
+                .iter()
+                .filter(|profile| profile.member_code.as_deref() == Some("jqw"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn create_codex_gateway_profile_preserves_member_metadata_and_uses_team_key() {
+        let mut profiles = GatewayAccessProfiles::default();
+
+        let created = create_codex_gateway_profile_in_profiles(
+            &mut profiles,
+            CodexGatewayProfileMutation {
+                name: Some("姜大大".into()),
+                api_key: None,
+                enabled: Some(true),
+                member_code: Some(" J/D D ".into()),
+                role_title: Some("产品与方法论".into()),
+                persona_summary: Some("高频输出".into()),
+                color: Some("#4c6ef5".into()),
+                notes: Some("高频使用成员".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created.name, "姜大大");
+        assert_eq!(created.member_code.as_deref(), Some("jdd"));
+        assert_eq!(created.role_title.as_deref(), Some("产品与方法论"));
+        assert_eq!(created.persona_summary.as_deref(), Some("高频输出"));
+        assert_eq!(created.color.as_deref(), Some("#4c6ef5"));
+        assert_eq!(created.notes.as_deref(), Some("高频使用成员"));
+        assert!(created.api_key.starts_with("sk-team-jdd-"));
+
+        let listed = codex_gateway_profiles(&profiles);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].member_code.as_deref(), Some("jdd"));
+        assert_eq!(listed[0].role_title.as_deref(), Some("产品与方法论"));
+        assert_eq!(listed[0].persona_summary.as_deref(), Some("高频输出"));
+        assert_eq!(listed[0].color.as_deref(), Some("#4c6ef5"));
+        assert_eq!(listed[0].notes.as_deref(), Some("高频使用成员"));
+    }
+
+    #[test]
+    fn create_codex_gateway_profile_rejects_duplicate_member_code() {
+        let mut profiles = import_codex_team_template_profiles(GatewayAccessProfiles::default());
+
+        let error = create_codex_gateway_profile_in_profiles(
+            &mut profiles,
+            CodexGatewayProfileMutation {
+                name: Some("重复姜大大".into()),
+                api_key: None,
+                enabled: Some(true),
+                member_code: Some("JDD".into()),
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("member code"));
+    }
+
+    #[test]
+    fn regenerate_codex_gateway_profile_api_key_preserves_member_identity() {
+        let mut profiles = GatewayAccessProfiles {
+            profiles: vec![GatewayAccessProfile {
+                id: "codex-jdd".into(),
+                name: "姜大大".into(),
+                target: GatewayTarget::Codex,
+                api_key: "sk-team-jdd-oldkey01".into(),
+                enabled: true,
+                member_code: Some("jdd".into()),
+                role_title: Some("产品与方法论".into()),
+                persona_summary: Some("高频输出".into()),
+                color: Some("#4c6ef5".into()),
+                notes: Some("keep".into()),
+            }],
+        };
+
+        let regenerated =
+            regenerate_codex_gateway_profile_api_key_in_profiles(&mut profiles, "codex-jdd")
+                .unwrap();
+
+        assert_eq!(regenerated.name, "姜大大");
+        assert_eq!(regenerated.member_code.as_deref(), Some("jdd"));
+        assert_eq!(regenerated.notes.as_deref(), Some("keep"));
+        assert!(regenerated.api_key.starts_with("sk-team-jdd-"));
+        assert_ne!(regenerated.api_key, "sk-team-jdd-oldkey01");
+    }
+
+    #[test]
+    fn reset_codex_gateway_profile_to_team_defaults_restores_preset_metadata() {
+        let mut profiles = GatewayAccessProfiles {
+            profiles: vec![GatewayAccessProfile {
+                id: "codex-jdd".into(),
+                name: "临时名称".into(),
+                target: GatewayTarget::Codex,
+                api_key: "sk-team-jdd-existing".into(),
+                enabled: false,
+                member_code: Some("jdd".into()),
+                role_title: Some("临时角色".into()),
+                persona_summary: Some("临时简介".into()),
+                color: Some("#000000".into()),
+                notes: Some("临时备注".into()),
+            }],
+        };
+
+        let reset =
+            reset_codex_gateway_profile_to_team_defaults_in_profiles(&mut profiles, "codex-jdd")
+                .unwrap();
+
+        assert_eq!(reset.name, "姜大大");
+        assert_eq!(reset.member_code.as_deref(), Some("jdd"));
+        assert_eq!(reset.role_title.as_deref(), Some("产品与方法论"));
+        assert_eq!(
+            reset.persona_summary.as_deref(),
+            Some("高频输出，偏产品与方法论视角，擅长比较工具优劣并推动落地。")
+        );
+        assert_eq!(reset.color.as_deref(), Some("#4c6ef5"));
+        assert_eq!(reset.notes, None);
+        assert!(reset.enabled);
+        assert_eq!(reset.api_key, "sk-team-jdd-existing");
+    }
+
+    #[test]
+    fn update_codex_gateway_profile_rejects_duplicate_member_code() {
+        let mut profiles = import_codex_team_template_profiles(GatewayAccessProfiles::default());
+        profiles.upsert_profile(GatewayAccessProfile {
+            id: "codex-custom".into(),
+            name: "Custom".into(),
+            target: GatewayTarget::Codex,
+            api_key: "sk-custom".into(),
+            enabled: true,
+            member_code: Some("custom".into()),
+            role_title: None,
+            persona_summary: None,
+            color: None,
+            notes: None,
+        });
+
+        let error = update_codex_gateway_profile_in_profiles(
+            &mut profiles,
+            "codex-custom",
+            CodexGatewayProfileMutation {
+                name: None,
+                api_key: None,
+                enabled: None,
+                member_code: Some(" j/d d ".into()),
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("member code"));
+    }
+
+    #[test]
+    fn delete_codex_gateway_profile_rejects_builtin_team_member() {
+        let mut profiles = import_codex_team_template_profiles(GatewayAccessProfiles::default());
+        let jdd = profiles
+            .list_by_target(GatewayTarget::Codex)
+            .into_iter()
+            .find(|profile| profile.member_code.as_deref() == Some("jdd"))
+            .unwrap();
+
+        let error = delete_codex_gateway_profile_in_profiles(&mut profiles, &jdd.id).unwrap_err();
+
+        assert!(error.contains("disable"));
+        assert_eq!(profiles.list_by_target(GatewayTarget::Codex).len(), 10);
+    }
+
+    #[test]
+    fn delete_codex_gateway_profile_allows_removing_noncanonical_duplicate_team_member_code() {
+        let mut profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-jdd".into(),
+                    name: "姜大大".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-team-jdd-a".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: Some("产品与方法论".into()),
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
+                GatewayAccessProfile {
+                    id: "codex-dup-jdd".into(),
+                    name: "姜大大副本".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-team-jdd-b".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
+            ],
+        };
+
+        delete_codex_gateway_profile_in_profiles(&mut profiles, "codex-dup-jdd").unwrap();
+
+        let codex_profiles = profiles.list_by_target(GatewayTarget::Codex);
+        assert_eq!(codex_profiles.len(), 1);
+        assert_eq!(codex_profiles[0].id, "codex-jdd");
     }
 }

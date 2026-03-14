@@ -1060,6 +1060,87 @@ fn to_i64(value: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
+#[derive(Default)]
+struct GatewayProfileLogMetadata {
+    gateway_profile_id: Option<String>,
+    gateway_profile_name: Option<String>,
+    member_code: Option<String>,
+    role_title: Option<String>,
+    display_label: Option<String>,
+    api_key_suffix: Option<String>,
+    color: Option<String>,
+}
+
+fn trimmed_profile_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn build_gateway_profile_display_label(
+    name: Option<&str>,
+    member_code: Option<&str>,
+    role_title: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(name) = trimmed_profile_value(name) {
+        parts.push(name);
+    }
+    if let Some(member_code) = trimmed_profile_value(member_code) {
+        parts.push(member_code);
+    }
+    if let Some(role_title) = trimmed_profile_value(role_title) {
+        parts.push(role_title);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn extract_gateway_api_key_suffix(api_key: &str) -> Option<String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit('-')
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn build_gateway_profile_log_metadata(
+    gateway_profile: Option<&GatewayAccessProfile>,
+) -> GatewayProfileLogMetadata {
+    let Some(profile) = gateway_profile else {
+        return GatewayProfileLogMetadata::default();
+    };
+
+    let gateway_profile_name = trimmed_profile_value(Some(profile.name.as_str()));
+    let member_code = trimmed_profile_value(profile.member_code.as_deref());
+    let role_title = trimmed_profile_value(profile.role_title.as_deref());
+
+    GatewayProfileLogMetadata {
+        gateway_profile_id: trimmed_profile_value(Some(profile.id.as_str())),
+        gateway_profile_name: gateway_profile_name.clone(),
+        member_code: member_code.clone(),
+        role_title: role_title.clone(),
+        display_label: build_gateway_profile_display_label(
+            gateway_profile_name.as_deref(),
+            member_code.as_deref(),
+            role_title.as_deref(),
+        ),
+        api_key_suffix: extract_gateway_api_key_suffix(&profile.api_key),
+        color: trimmed_profile_value(profile.color.as_deref()),
+    }
+}
+
 fn build_request_log(
     meta: &ForwardMeta,
     model: String,
@@ -1068,6 +1149,8 @@ fn build_request_log(
     error_message: Option<String>,
     gateway_profile: Option<&GatewayAccessProfile>,
 ) -> RequestLog {
+    let metadata = build_gateway_profile_log_metadata(gateway_profile);
+
     RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
         timestamp: chrono::Utc::now().timestamp(),
@@ -1081,8 +1164,13 @@ fn build_request_log(
         status: status.to_string(),
         error_message,
         request_duration_ms: Some(meta.started_at.elapsed().as_millis() as i64),
-        gateway_profile_id: gateway_profile.map(|profile| profile.id.clone()),
-        gateway_profile_name: gateway_profile.map(|profile| profile.name.clone()),
+        gateway_profile_id: metadata.gateway_profile_id,
+        gateway_profile_name: metadata.gateway_profile_name,
+        member_code: metadata.member_code,
+        role_title: metadata.role_title,
+        display_label: metadata.display_label,
+        api_key_suffix: metadata.api_key_suffix,
+        color: metadata.color,
     }
 }
 
@@ -1131,6 +1219,7 @@ async fn add_failed_log(
     error: String,
     gateway_profile: Option<&GatewayAccessProfile>,
 ) {
+    let metadata = build_gateway_profile_log_metadata(gateway_profile);
     let log = RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
         timestamp: chrono::Utc::now().timestamp(),
@@ -1144,8 +1233,13 @@ async fn add_failed_log(
         status: "error".to_string(),
         error_message: Some(error),
         request_duration_ms: None,
-        gateway_profile_id: gateway_profile.map(|profile| profile.id.clone()),
-        gateway_profile_name: gateway_profile.map(|profile| profile.name.clone()),
+        gateway_profile_id: metadata.gateway_profile_id,
+        gateway_profile_name: metadata.gateway_profile_name,
+        member_code: metadata.member_code,
+        role_title: metadata.role_title,
+        display_label: metadata.display_label,
+        api_key_suffix: metadata.api_key_suffix,
+        color: metadata.color,
     };
     let mut guard = logger.write().await;
     guard.add_log(log.clone());
@@ -1308,3 +1402,52 @@ pub enum CodexRejection {
 }
 
 impl warp::reject::Reject for CodexRejection {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::gateway_access::{GatewayAccessProfile, GatewayTarget};
+
+    #[test]
+    fn build_request_log_captures_member_identity_fields() {
+        let meta = ForwardMeta {
+            account_id: "account-1".to_string(),
+            account_email: "user@example.com".to_string(),
+            format: "openai-responses".to_string(),
+            model: "gpt-5".to_string(),
+            started_at: std::time::Instant::now(),
+        };
+        let profile = GatewayAccessProfile {
+            id: "codex-jdd".to_string(),
+            name: "姜大大".to_string(),
+            target: GatewayTarget::Codex,
+            api_key: "sk-team-jdd-a4f29c7e".to_string(),
+            enabled: true,
+            member_code: Some("jdd".to_string()),
+            role_title: Some("产品与方法论".to_string()),
+            persona_summary: Some("高频输出，偏产品与方法论视角".to_string()),
+            color: Some("#4c6ef5".to_string()),
+            notes: Some("核心体验 owner".to_string()),
+        };
+
+        let log = build_request_log(
+            &meta,
+            "gpt-5".to_string(),
+            "success",
+            UsageStats {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+            },
+            None,
+            Some(&profile),
+        );
+        let row = serde_json::to_value(&log).unwrap();
+
+        assert_eq!(row["member_code"], "jdd");
+        assert_eq!(row["role_title"], "产品与方法论");
+        assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
+        assert_eq!(row["api_key_suffix"], "a4f29c7e");
+        assert_eq!(row["color"], "#4c6ef5");
+    }
+}
