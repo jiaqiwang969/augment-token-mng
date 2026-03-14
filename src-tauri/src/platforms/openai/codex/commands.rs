@@ -228,12 +228,6 @@ fn generate_gateway_api_key() -> String {
     format!("sk-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-pub(crate) fn generate_team_gateway_api_key(member_code: &str) -> String {
-    let trimmed = member_code.trim().to_ascii_lowercase();
-    let random = Uuid::new_v4().simple().to_string();
-    format!("sk-team-{}-{}", trimmed, &random[..8])
-}
-
 fn default_codex_gateway_profile_name(profiles: &GatewayAccessProfiles) -> String {
     let next_index = profiles
         .list_by_target(GatewayTarget::Codex)
@@ -1152,7 +1146,9 @@ async fn stop_periodic_quota_refresh() {
 mod tests {
     use super::*;
     use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
-    use crate::platforms::openai::codex::team_profiles::import_team_template_into_profiles;
+    use crate::platforms::openai::codex::team_profiles::{
+        generate_team_gateway_api_key, import_team_template_into_profiles,
+    };
 
     #[test]
     fn codex_access_server_url_uses_unified_v1_base_url() {
@@ -1224,6 +1220,14 @@ mod tests {
     #[test]
     fn generate_team_gateway_api_key_uses_member_code_prefix() {
         let key = generate_team_gateway_api_key("jdd");
+
+        assert!(key.starts_with("sk-team-jdd-"));
+        assert_eq!(key.len(), "sk-team-jdd-".len() + 8);
+    }
+
+    #[test]
+    fn generate_team_gateway_api_key_normalizes_member_code() {
+        let key = generate_team_gateway_api_key(" J/D D ");
 
         assert!(key.starts_with("sk-team-jdd-"));
         assert_eq!(key.len(), "sk-team-jdd-".len() + 8);

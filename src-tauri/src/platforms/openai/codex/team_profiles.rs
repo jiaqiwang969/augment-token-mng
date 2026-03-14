@@ -1,7 +1,5 @@
 use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
 
-use super::commands::generate_team_gateway_api_key;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TeamProfilePreset {
     pub name: &'static str,
@@ -99,13 +97,39 @@ pub fn team_profile_presets() -> &'static [TeamProfilePreset] {
     &TEAM_PROFILE_PRESETS
 }
 
+pub(crate) fn normalize_member_code(member_code: &str) -> Option<String> {
+    let normalized: String = member_code
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub(crate) fn generate_team_gateway_api_key(member_code: &str) -> String {
+    let normalized = normalize_member_code(member_code).unwrap_or_else(|| "member".to_string());
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    format!("sk-team-{}-{}", normalized, &random[..8])
+}
+
 pub fn import_team_template_into_profiles(
     mut profiles: GatewayAccessProfiles,
 ) -> GatewayAccessProfiles {
     for preset in team_profile_presets() {
+        let preset_member_code = normalize_member_code(preset.member_code)
+            .unwrap_or_else(|| preset.member_code.to_string());
         if let Some(existing) = profiles.profiles.iter_mut().find(|profile| {
             profile.target == GatewayTarget::Codex
-                && profile.member_code.as_deref() == Some(preset.member_code)
+                && profile
+                    .member_code
+                    .as_deref()
+                    .and_then(normalize_member_code)
+                    == Some(preset_member_code.clone())
         }) {
             existing.name = preset.name.to_string();
             existing.member_code = Some(preset.member_code.to_string());
@@ -121,7 +145,7 @@ pub fn import_team_template_into_profiles(
         }
 
         profiles.upsert_profile(GatewayAccessProfile {
-            id: format!("codex-{}", preset.member_code),
+            id: format!("codex-{}", preset_member_code),
             name: preset.name.to_string(),
             target: GatewayTarget::Codex,
             api_key: generate_team_gateway_api_key(preset.member_code),
@@ -135,4 +159,47 @@ pub fn import_team_template_into_profiles(
     }
 
     profiles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_team_template_normalizes_member_code_before_matching_existing_profiles() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![GatewayAccessProfile {
+                id: "custom-jdd".into(),
+                name: "旧姜大大".into(),
+                target: GatewayTarget::Codex,
+                api_key: "sk-existing-jdd".into(),
+                enabled: true,
+                member_code: Some(" J/D D ".into()),
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: Some("keep-me".into()),
+            }],
+        };
+
+        let imported = import_team_template_into_profiles(profiles);
+        let codex_profiles = imported.list_by_target(GatewayTarget::Codex);
+
+        assert_eq!(codex_profiles.len(), 10);
+        assert_eq!(
+            codex_profiles
+                .iter()
+                .filter(|profile| profile.member_code.as_deref() == Some("jdd"))
+                .count(),
+            1
+        );
+
+        let jdd = codex_profiles
+            .iter()
+            .find(|profile| profile.member_code.as_deref() == Some("jdd"))
+            .unwrap();
+        assert_eq!(jdd.id, "custom-jdd");
+        assert_eq!(jdd.api_key, "sk-existing-jdd");
+        assert_eq!(jdd.notes.as_deref(), Some("keep-me"));
+    }
 }
