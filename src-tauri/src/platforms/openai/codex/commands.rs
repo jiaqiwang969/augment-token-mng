@@ -228,6 +228,12 @@ fn generate_gateway_api_key() -> String {
     format!("sk-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+pub(crate) fn generate_team_gateway_api_key(member_code: &str) -> String {
+    let trimmed = member_code.trim().to_ascii_lowercase();
+    let random = Uuid::new_v4().simple().to_string();
+    format!("sk-team-{}-{}", trimmed, &random[..8])
+}
+
 fn default_codex_gateway_profile_name(profiles: &GatewayAccessProfiles) -> String {
     let next_index = profiles
         .list_by_target(GatewayTarget::Codex)
@@ -288,6 +294,11 @@ fn sync_legacy_codex_access_profile(
                 target: GatewayTarget::Codex,
                 api_key,
                 enabled: true,
+                member_code: None,
+                role_title: None,
+                persona_summary: None,
+                color: None,
+                notes: None,
             });
         }
         None => {
@@ -764,6 +775,11 @@ pub async fn create_codex_gateway_profile(
         target: GatewayTarget::Codex,
         api_key: normalize_gateway_api_key(api_key).unwrap_or_else(generate_gateway_api_key),
         enabled: enabled.unwrap_or(true),
+        member_code: None,
+        role_title: None,
+        persona_summary: None,
+        color: None,
+        notes: None,
     };
     let created_id = entry.id.clone();
     profiles.upsert_profile(entry);
@@ -1136,6 +1152,7 @@ async fn stop_periodic_quota_refresh() {
 mod tests {
     use super::*;
     use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
+    use crate::platforms::openai::codex::team_profiles::import_team_template_into_profiles;
 
     #[test]
     fn codex_access_server_url_uses_unified_v1_base_url() {
@@ -1152,6 +1169,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-old-default".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "codex-user-a".into(),
@@ -1159,6 +1181,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-alice".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "augment-default".into(),
@@ -1166,6 +1193,11 @@ mod tests {
                     target: GatewayTarget::Augment,
                     api_key: "sk-augment".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
             ],
         };
@@ -1187,5 +1219,37 @@ mod tests {
             updated.first_enabled_api_key_for_target(GatewayTarget::Codex),
             Some("sk-new-default".to_string())
         );
+    }
+
+    #[test]
+    fn generate_team_gateway_api_key_uses_member_code_prefix() {
+        let key = generate_team_gateway_api_key("jdd");
+
+        assert!(key.starts_with("sk-team-jdd-"));
+        assert_eq!(key.len(), "sk-team-jdd-".len() + 8);
+    }
+
+    #[test]
+    fn import_team_template_into_profiles_is_idempotent_by_member_code() {
+        let imported = import_team_template_into_profiles(GatewayAccessProfiles::default());
+        let imported = import_team_template_into_profiles(imported);
+        let codex_profiles = imported.list_by_target(GatewayTarget::Codex);
+
+        assert_eq!(codex_profiles.len(), 10);
+        assert_eq!(
+            codex_profiles
+                .iter()
+                .filter(|profile| profile.member_code.as_deref() == Some("jdd"))
+                .count(),
+            1
+        );
+
+        let jdd = codex_profiles
+            .iter()
+            .find(|profile| profile.member_code.as_deref() == Some("jdd"))
+            .unwrap();
+        assert_eq!(jdd.name, "姜大大");
+        assert_eq!(jdd.role_title.as_deref(), Some("产品与方法论"));
+        assert!(jdd.api_key.starts_with("sk-team-jdd-"));
     }
 }

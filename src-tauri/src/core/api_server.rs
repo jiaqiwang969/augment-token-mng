@@ -1264,6 +1264,11 @@ mod tests {
                     target: GatewayTarget::Codex,
                     api_key: "sk-codex".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
                 GatewayAccessProfile {
                     id: "augment-default".into(),
@@ -1271,6 +1276,11 @@ mod tests {
                     target: GatewayTarget::Augment,
                     api_key: "sk-augment".into(),
                     enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
                 },
             ],
         }
