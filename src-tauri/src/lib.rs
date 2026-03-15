@@ -46,7 +46,7 @@ use crate::platforms::augment::models::AugmentOAuthState;
 use crate::platforms::augment::sidecar::AugmentSidecar;
 use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
 use crate::platforms::openai::codex::logger::RequestLogger;
-use crate::platforms::openai::codex::pool::CodexServerConfig;
+use crate::platforms::openai::codex::pool::{CodexRelayHealthSnapshot, CodexServerConfig};
 use crate::platforms::openai::codex::storage::CodexLogStorage;
 use crate::platforms::openai::codex::{CodexExecutor, CodexPool, CodexServer};
 use crate::platforms::openai::models::OpenAIOAuthSession;
@@ -97,6 +97,8 @@ pub struct AppState {
     pub codex_unsupported_params:
         Arc<crate::platforms::openai::codex::server::UnsupportedParamCache>,
     pub codex_server_config: Arc<Mutex<Option<CodexServerConfig>>>,
+    pub codex_relay_health_snapshot: Arc<Mutex<CodexRelayHealthSnapshot>>,
+    pub codex_relay_health_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub gateway_access_profiles:
         Arc<Mutex<Option<crate::core::gateway_access::GatewayAccessProfiles>>>,
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
@@ -282,6 +284,10 @@ pub fn run() {
                     crate::platforms::openai::codex::server::UnsupportedParamCache::load(&app_data_dir),
                 ),
                 codex_server_config: Arc::new(Mutex::new(None)),
+                codex_relay_health_snapshot: Arc::new(Mutex::new(
+                    CodexRelayHealthSnapshot::default(),
+                )),
+                codex_relay_health_task: Arc::new(tokio::sync::Mutex::new(None)),
                 gateway_access_profiles: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
                 codex_archive_storage: Arc::new(Mutex::new(None)),
@@ -537,6 +543,8 @@ pub fn run() {
                         codex_server: state.codex_server.clone(),
                         codex_unsupported_params: state.codex_unsupported_params.clone(),
                         codex_server_config: state.codex_server_config.clone(),
+                        codex_relay_health_snapshot: state.codex_relay_health_snapshot.clone(),
+                        codex_relay_health_task: state.codex_relay_health_task.clone(),
                         gateway_access_profiles: state.gateway_access_profiles.clone(),
                         codex_log_storage: state.codex_log_storage.clone(),
                         codex_archive_storage: state.codex_archive_storage.clone(),

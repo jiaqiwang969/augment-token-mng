@@ -136,6 +136,8 @@ pub async fn start_api_server_cmd(
             codex_server: state.codex_server.clone(),
             codex_unsupported_params: state.codex_unsupported_params.clone(),
             codex_server_config: state.codex_server_config.clone(),
+            codex_relay_health_snapshot: state.codex_relay_health_snapshot.clone(),
+            codex_relay_health_task: state.codex_relay_health_task.clone(),
             gateway_access_profiles: state.gateway_access_profiles.clone(),
             codex_log_storage: state.codex_log_storage.clone(),
             codex_archive_storage: state.codex_archive_storage.clone(),

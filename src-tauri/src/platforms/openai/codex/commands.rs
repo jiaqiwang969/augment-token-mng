@@ -108,6 +108,26 @@ fn normalize_runtime_fields(config: &mut CodexServerConfig) {
     if config.quota_refresh_interval_seconds > MAX_QUOTA_REFRESH_INTERVAL_SECONDS {
         config.quota_refresh_interval_seconds = MAX_QUOTA_REFRESH_INTERVAL_SECONDS;
     }
+
+    config.relay.host = normalize_optional_gateway_field(config.relay.host.take());
+    config.relay.control_socket =
+        normalize_optional_gateway_field(config.relay.control_socket.take());
+
+    if config.relay.public_base_url.trim().is_empty() {
+        config.relay.public_base_url = defaults.relay.public_base_url;
+    }
+    if config.relay.remote_port == 0 {
+        config.relay.remote_port = defaults.relay.remote_port;
+    }
+    if config.relay.local_port == 0 {
+        config.relay.local_port = defaults.relay.local_port;
+    }
+    if config.relay.health_check_interval_seconds < defaults.relay.health_check_interval_seconds {
+        config.relay.health_check_interval_seconds = defaults.relay.health_check_interval_seconds;
+    }
+    if config.relay.auto_repair_cooldown_seconds < defaults.relay.auto_repair_cooldown_seconds {
+        config.relay.auto_repair_cooldown_seconds = defaults.relay.auto_repair_cooldown_seconds;
+    }
 }
 
 fn runtime_settings_from_config(config: &CodexServerConfig) -> CodexRuntimeSettings {
@@ -1613,6 +1633,7 @@ async fn stop_periodic_quota_refresh() {
 mod tests {
     use super::*;
     use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
+    use crate::platforms::openai::codex::pool::{CodexRelayHealthSnapshot, CodexRelayLayerHealth};
     use crate::platforms::openai::codex::team_profiles::{
         generate_team_gateway_api_key, import_team_template_into_profiles,
     };
@@ -1620,6 +1641,87 @@ mod tests {
     #[test]
     fn codex_access_server_url_uses_unified_v1_base_url() {
         assert_eq!(gateway_server_url(9123), "http://127.0.0.1:9123/v1");
+    }
+
+    #[test]
+    fn codex_relay_health_config_defaults_normalize_to_ten_minutes() {
+        let mut config = CodexServerConfig::default();
+        config.relay.health_check_interval_seconds = 30;
+        config.relay.auto_repair_cooldown_seconds = 0;
+
+        normalize_runtime_fields(&mut config);
+
+        assert_eq!(config.relay.health_check_interval_seconds, 600);
+        assert_eq!(config.relay.auto_repair_cooldown_seconds, 600);
+    }
+
+    #[test]
+    fn codex_relay_health_config_deserializes_when_legacy_relay_fields_are_missing() {
+        let legacy = r#"{
+          "port": 8766,
+          "enabled": true,
+          "pool_strategy": "round-robin",
+          "selected_account_id": null,
+          "api_key": "sk-legacy",
+          "quota_refresh_enabled": true,
+          "quota_refresh_interval_seconds": 1800,
+          "fast_mode_enabled": false
+        }"#;
+
+        let mut config: CodexServerConfig = serde_json::from_str(legacy).unwrap();
+        normalize_runtime_fields(&mut config);
+
+        assert_eq!(config.relay.public_base_url, "https://lingkong.xyz/v1");
+        assert_eq!(config.relay.health_check_interval_seconds, 600);
+        assert_eq!(config.relay.auto_repair_cooldown_seconds, 600);
+    }
+
+    #[test]
+    fn codex_relay_health_config_aggregate_state_maps_expected_statuses() {
+        let mut status = CodexRelayHealthSnapshot::default();
+
+        status.local = CodexRelayLayerHealth {
+            healthy: false,
+            last_checked_at: Some(1),
+            ..Default::default()
+        };
+        status.public = CodexRelayLayerHealth {
+            healthy: false,
+            last_checked_at: Some(1),
+            ..Default::default()
+        };
+        status.refresh_overall();
+        assert_eq!(status.overall.state, "local_down");
+
+        status.local = CodexRelayLayerHealth {
+            healthy: true,
+            last_checked_at: Some(2),
+            ..Default::default()
+        };
+        status.public = CodexRelayLayerHealth {
+            healthy: false,
+            last_checked_at: Some(2),
+            ..Default::default()
+        };
+        status.refresh_overall();
+        assert_eq!(status.overall.state, "public_down");
+
+        status.public = CodexRelayLayerHealth {
+            healthy: true,
+            last_checked_at: Some(3),
+            ..Default::default()
+        };
+        status.refresh_overall();
+        assert_eq!(status.overall.state, "healthy");
+
+        status.public = CodexRelayLayerHealth {
+            healthy: false,
+            last_checked_at: Some(4),
+            repair_in_progress: true,
+            ..Default::default()
+        };
+        status.refresh_overall();
+        assert_eq!(status.overall.state, "in_progress");
     }
 
     #[test]

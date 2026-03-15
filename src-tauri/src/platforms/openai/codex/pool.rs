@@ -393,6 +393,89 @@ pub struct CodexServerStatus {
     pub pool_status: Option<PoolStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodexRelayConfig {
+    #[serde(default = "default_codex_relay_public_base_url")]
+    pub public_base_url: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default = "default_codex_relay_remote_port")]
+    pub remote_port: u16,
+    #[serde(default = "default_codex_relay_local_port")]
+    pub local_port: u16,
+    #[serde(default)]
+    pub control_socket: Option<String>,
+    #[serde(default = "default_codex_relay_health_check_interval_seconds")]
+    pub health_check_interval_seconds: u64,
+    #[serde(default = "default_codex_relay_auto_repair_enabled")]
+    pub auto_repair_enabled: bool,
+    #[serde(default = "default_codex_relay_auto_repair_cooldown_seconds")]
+    pub auto_repair_cooldown_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CodexRelayLayerHealth {
+    #[serde(default)]
+    pub healthy: bool,
+    #[serde(default)]
+    pub last_checked_at: Option<i64>,
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub repair_in_progress: bool,
+    #[serde(default)]
+    pub last_repair_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub last_repair_result: Option<String>,
+    #[serde(default)]
+    pub cooldown_until: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodexRelayOverallHealth {
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodexRelayHealthSnapshot {
+    #[serde(default)]
+    pub local: CodexRelayLayerHealth,
+    #[serde(default)]
+    pub public: CodexRelayLayerHealth,
+    #[serde(default)]
+    pub overall: CodexRelayOverallHealth,
+}
+
+impl CodexRelayHealthSnapshot {
+    pub fn refresh_overall(&mut self) {
+        self.overall.state = Self::derive_overall_state(&self.local, &self.public).to_string();
+    }
+
+    fn derive_overall_state(
+        local: &CodexRelayLayerHealth,
+        public: &CodexRelayLayerHealth,
+    ) -> &'static str {
+        if local.repair_in_progress || public.repair_in_progress {
+            return "in_progress";
+        }
+
+        if local.last_checked_at.is_some() && !local.healthy {
+            return "local_down";
+        }
+
+        if local.last_checked_at.is_some() && public.last_checked_at.is_some() {
+            if public.healthy {
+                return "healthy";
+            }
+            return "public_down";
+        }
+
+        "unknown"
+    }
+}
+
 /// Codex 服务器配置
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CodexServerConfig {
@@ -411,6 +494,8 @@ pub struct CodexServerConfig {
     pub quota_refresh_interval_seconds: u64,
     #[serde(default)]
     pub fast_mode_enabled: bool,
+    #[serde(default)]
+    pub relay: CodexRelayConfig,
 }
 
 fn default_codex_enabled() -> bool {
@@ -425,6 +510,63 @@ fn default_quota_refresh_interval_seconds() -> u64 {
     30 * 60
 }
 
+fn default_codex_relay_public_base_url() -> String {
+    "https://lingkong.xyz/v1".to_string()
+}
+
+fn default_codex_relay_remote_port() -> u16 {
+    19090
+}
+
+fn default_codex_relay_local_port() -> u16 {
+    8766
+}
+
+fn default_codex_relay_health_check_interval_seconds() -> u64 {
+    10 * 60
+}
+
+fn default_codex_relay_auto_repair_enabled() -> bool {
+    true
+}
+
+fn default_codex_relay_auto_repair_cooldown_seconds() -> u64 {
+    10 * 60
+}
+
+impl Default for CodexRelayConfig {
+    fn default() -> Self {
+        Self {
+            public_base_url: default_codex_relay_public_base_url(),
+            host: None,
+            remote_port: default_codex_relay_remote_port(),
+            local_port: default_codex_relay_local_port(),
+            control_socket: None,
+            health_check_interval_seconds: default_codex_relay_health_check_interval_seconds(),
+            auto_repair_enabled: default_codex_relay_auto_repair_enabled(),
+            auto_repair_cooldown_seconds: default_codex_relay_auto_repair_cooldown_seconds(),
+        }
+    }
+}
+
+impl Default for CodexRelayOverallHealth {
+    fn default() -> Self {
+        Self {
+            state: "unknown".to_string(),
+        }
+    }
+}
+
+impl Default for CodexRelayHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            local: CodexRelayLayerHealth::default(),
+            public: CodexRelayLayerHealth::default(),
+            overall: CodexRelayOverallHealth::default(),
+        }
+    }
+}
+
 impl Default for CodexServerConfig {
     fn default() -> Self {
         Self {
@@ -436,6 +578,7 @@ impl Default for CodexServerConfig {
             quota_refresh_enabled: true,
             quota_refresh_interval_seconds: 30 * 60,
             fast_mode_enabled: false,
+            relay: CodexRelayConfig::default(),
         }
     }
 }
