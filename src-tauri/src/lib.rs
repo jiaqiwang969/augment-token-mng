@@ -44,6 +44,8 @@ use crate::data::subscription::SubscriptionDualStorage;
 use crate::features::mail::{gptmail, hme, hme_storage::HmeStorage, outlook};
 use crate::platforms::augment::models::AugmentOAuthState;
 use crate::platforms::augment::sidecar::AugmentSidecar;
+#[cfg(test)]
+use crate::platforms::antigravity::sidecar::AntigravitySidecar;
 use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
 use crate::platforms::openai::codex::logger::RequestLogger;
 use crate::platforms::openai::codex::pool::CodexServerConfig;
@@ -134,6 +136,7 @@ fn resolve_augment_sidecar_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platforms::antigravity::sidecar::AntigravitySidecar;
     use crate::platforms::augment::sidecar::AugmentSidecar;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -222,6 +225,51 @@ mod tests {
         assert!(
             guard.as_ref().is_some(),
             "sidecar manager should stay registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_managed_antigravity_sidecar_on_shutdown_preserves_manager_instance() {
+        let temp_dir = tempdir().unwrap();
+        let managed_sidecar = Arc::new(tokio::sync::Mutex::new(Some(AntigravitySidecar::new(
+            temp_dir.path(),
+            PathBuf::from("/tmp/cliproxy-server"),
+        ))));
+
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_antigravity_auths")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_antigravity_home")).unwrap();
+        std::fs::write(
+            temp_dir.path().join("cliproxy_antigravity_config.yaml"),
+            b"port: 12345",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("cliproxy_antigravity_runtime.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        cleanup_managed_antigravity_sidecar_on_shutdown(managed_sidecar.clone(), async {}).await;
+
+        assert!(!temp_dir.path().join("cliproxy_antigravity_auths").exists());
+        assert!(!temp_dir.path().join("cliproxy_antigravity_home").exists());
+        assert!(
+            !temp_dir
+                .path()
+                .join("cliproxy_antigravity_config.yaml")
+                .exists()
+        );
+        assert!(
+            !temp_dir
+                .path()
+                .join("cliproxy_antigravity_runtime.json")
+                .exists()
+        );
+
+        let guard = managed_sidecar.lock().await;
+        assert!(
+            guard.as_ref().is_some(),
+            "antigravity sidecar manager should stay registered"
         );
     }
 }
@@ -966,6 +1014,26 @@ async fn cleanup_managed_sidecar_on_shutdown<F>(
 {
     shutdown_signal.await;
     crate::core::api_server::stop_managed_augment_sidecar(&managed_sidecar).await;
+}
+
+#[cfg(test)]
+async fn cleanup_managed_antigravity_sidecar_on_shutdown<F>(
+    managed_sidecar: Arc<tokio::sync::Mutex<Option<AntigravitySidecar>>>,
+    shutdown_signal: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    shutdown_signal.await;
+    let sidecar = {
+        let mut guard = managed_sidecar.lock().await;
+        guard.take()
+    };
+
+    if let Some(mut sidecar) = sidecar {
+        sidecar.stop().await;
+        let mut guard = managed_sidecar.lock().await;
+        *guard = Some(sidecar);
+    }
 }
 
 #[cfg(unix)]
