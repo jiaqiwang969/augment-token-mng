@@ -9,6 +9,10 @@ use tauri::{Manager, State};
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
+use super::archive::{
+    ArchiveSessionConfidence, export_archive_session_jsonl, materialize_archive_session_file,
+};
+use super::archive_storage::ArchiveSessionRow;
 use super::logger::RequestLogger;
 use super::models::{
     DailyStatsResponse, GatewayDailyStatsResponse, LogPage, LogQuery, ModelTokenStats,
@@ -1357,6 +1361,48 @@ pub struct CodexLogStorageStatus {
     pub db_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexArchiveStatus {
+    pub total_sessions: i64,
+    pub total_turns: i64,
+    pub db_size_bytes: u64,
+    pub db_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexArchiveSessionEntry {
+    pub archive_session_id: String,
+    pub gateway_profile_id: String,
+    pub gateway_profile_name: Option<String>,
+    pub member_code: Option<String>,
+    pub display_label: Option<String>,
+    pub prompt_cache_key: Option<String>,
+    pub explicit_session_id: Option<String>,
+    pub confidence: String,
+    pub source: String,
+    pub originator: Option<String>,
+    pub client_user_agent: Option<String>,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+    pub turn_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexArchiveExportPayload {
+    pub archive_session_id: String,
+    pub jsonl: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexArchiveMaterializationResult {
+    pub exported_count: usize,
+    pub output_paths: Vec<String>,
+}
+
 /// 获取日志存储状态
 #[tauri::command]
 pub async fn get_codex_log_storage_status(
@@ -1374,6 +1420,89 @@ pub async fn get_codex_log_storage_status(
     } else {
         Err("Codex log storage not initialized".to_string())
     }
+}
+
+#[tauri::command]
+pub async fn get_codex_archive_status(
+    state: State<'_, AppState>,
+) -> Result<CodexArchiveStatus, String> {
+    let storage = get_codex_archive_storage(state.inner())?;
+    let total_sessions = storage.total_sessions()?;
+    let total_turns = storage.total_turns()?;
+    let db_size_bytes = storage.db_size()?;
+
+    Ok(CodexArchiveStatus {
+        total_sessions,
+        total_turns,
+        db_size_bytes,
+        db_path: storage.db_path().display().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn list_codex_archive_sessions(
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexArchiveSessionEntry>, String> {
+    let storage = get_codex_archive_storage(state.inner())?;
+
+    storage.list_sessions().map(|sessions| {
+        sessions
+            .into_iter()
+            .map(codex_archive_session_entry)
+            .collect()
+    })
+}
+
+#[tauri::command]
+pub async fn export_codex_archive_session(
+    state: State<'_, AppState>,
+    archive_session_id: String,
+) -> Result<CodexArchiveExportPayload, String> {
+    let storage = get_codex_archive_storage(state.inner())?;
+    let jsonl = export_archive_session_jsonl(storage.as_ref(), &archive_session_id)?;
+
+    Ok(CodexArchiveExportPayload {
+        archive_session_id,
+        jsonl,
+    })
+}
+
+#[tauri::command]
+pub async fn materialize_codex_archive_session_files(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    archive_session_id: Option<String>,
+) -> Result<CodexArchiveMaterializationResult, String> {
+    let storage = get_codex_archive_storage(state.inner())?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+
+    let session_ids = if let Some(archive_session_id) = archive_session_id {
+        vec![archive_session_id]
+    } else {
+        storage
+            .list_sessions()?
+            .into_iter()
+            .map(|session| session.archive_session_id)
+            .collect()
+    };
+
+    let mut output_paths = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        let path = materialize_archive_session_file(
+            storage.as_ref(),
+            app_data_dir.as_path(),
+            &session_id,
+        )?;
+        output_paths.push(path.display().to_string());
+    }
+
+    Ok(CodexArchiveMaterializationResult {
+        exported_count: output_paths.len(),
+        output_paths,
+    })
 }
 
 /// 手动刷新日志缓冲区到数据库
@@ -1410,6 +1539,44 @@ pub async fn get_codex_all_time_stats(
             requests: 0,
             tokens: 0,
         })
+    }
+}
+
+fn get_codex_archive_storage(
+    state: &AppState,
+) -> Result<Arc<crate::platforms::openai::codex::archive_storage::CodexArchiveStorage>, String> {
+    state
+        .codex_archive_storage
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Codex archive storage not initialized".to_string())
+}
+
+fn codex_archive_session_entry(session: ArchiveSessionRow) -> CodexArchiveSessionEntry {
+    CodexArchiveSessionEntry {
+        archive_session_id: session.archive_session_id,
+        gateway_profile_id: session.gateway_profile_id,
+        gateway_profile_name: session.gateway_profile_name,
+        member_code: session.member_code,
+        display_label: session.display_label,
+        prompt_cache_key: session.prompt_cache_key,
+        explicit_session_id: session.explicit_session_id,
+        confidence: archive_confidence_label(session.confidence).to_string(),
+        source: session.source,
+        originator: session.originator,
+        client_user_agent: session.client_user_agent,
+        first_seen_at: session.first_seen_at,
+        last_seen_at: session.last_seen_at,
+        turn_count: session.turn_count,
+    }
+}
+
+fn archive_confidence_label(confidence: ArchiveSessionConfidence) -> &'static str {
+    match confidence {
+        ArchiveSessionConfidence::High => "high",
+        ArchiveSessionConfidence::Medium => "medium",
+        ArchiveSessionConfidence::Low => "low",
     }
 }
 
