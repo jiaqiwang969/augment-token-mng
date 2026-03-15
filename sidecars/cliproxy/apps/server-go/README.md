@@ -1,12 +1,12 @@
 # server-go
 
-This directory hosts the CLIProxy Go backend used by the menubar app.
+This directory hosts the CLIProxy Go backend embedded by ATM as a sidecar.
 
 ## Current scope
 
 - Runtime providers: `auggie`, `antigravity`
 - Login commands: `go run ./cmd/server -auggie-login` and `go run ./cmd/server -antigravity-login`
-- Management surface kept for the menubar: `/v0/management/*`
+- Management surface kept for embedded orchestration: `/v0/management/*`
 - Removed from the active server surface: TUI mode, web token console, desktop frontend bootstrap, non-target provider login entrypoints
 
 ## Build

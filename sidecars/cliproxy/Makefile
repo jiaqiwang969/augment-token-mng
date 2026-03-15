@@ -1,16 +1,10 @@
-.PHONY: install-menubar open-menubar smoke flake-show build-package
+.PHONY: build test smoke
 
-install-menubar:
-	./scripts/install-menubar.sh
+build:
+	cd apps/server-go && go build ./cmd/server
 
-open-menubar:
-	open "$(HOME)/Applications/CLIProxyMenuBar.app"
+test:
+	cd apps/server-go && go test ./internal/translator ./internal/cmd ./sdk/auth ./sdk/cliproxy
 
 smoke:
 	bash ./scripts/smoke.sh
-
-flake-show:
-	nix flake show
-
-build-package:
-	nix build .#packages.aarch64-darwin.default

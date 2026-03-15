@@ -103,7 +103,7 @@ func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 }
 
 // newDefaultAuthManager creates a default authentication manager with the
-// runtime providers retained in CLIProxyAPI-wjq.
+// runtime providers retained in this embedded cliproxy sidecar workspace.
 func newDefaultAuthManager() *sdkAuth.Manager {
 	return sdkAuth.NewManager(
 		sdkAuth.GetTokenStore(),

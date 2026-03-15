@@ -3,9 +3,8 @@ set -euo pipefail
 
 required_paths=(
   "apps/server-go"
-  "apps/menubar-swift"
-  "flake.nix"
-  "docs/plans/2026-03-08-cliproxyapi-wjq-ddd-design.md"
+  "apps/server-go/cmd/server/main.go"
+  "README.md"
 )
 
 for path in "${required_paths[@]}"; do
