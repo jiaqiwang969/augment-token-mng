@@ -113,7 +113,8 @@ fn normalize_runtime_fields(config: &mut CodexServerConfig) {
     config.relay.control_socket =
         normalize_optional_gateway_field(config.relay.control_socket.take());
 
-    if config.relay.public_base_url.trim().is_empty() {
+    config.relay.public_base_url = config.relay.public_base_url.trim().to_string();
+    if config.relay.public_base_url.is_empty() {
         config.relay.public_base_url = defaults.relay.public_base_url;
     }
     if config.relay.remote_port == 0 {
@@ -128,6 +129,24 @@ fn normalize_runtime_fields(config: &mut CodexServerConfig) {
     if config.relay.auto_repair_cooldown_seconds < defaults.relay.auto_repair_cooldown_seconds {
         config.relay.auto_repair_cooldown_seconds = defaults.relay.auto_repair_cooldown_seconds;
     }
+}
+
+fn merge_start_codex_server_config(config: &mut CodexServerConfig, existing: &CodexServerConfig) {
+    if config.api_key.is_none() {
+        config.api_key = existing.api_key.clone();
+    }
+    if config.pool_strategy.trim().is_empty() {
+        config.pool_strategy = existing.pool_strategy.clone();
+    }
+    if config.selected_account_id.is_none() {
+        config.selected_account_id = existing.selected_account_id.clone();
+    }
+
+    // Runtime and relay settings are managed outside the start/stop dialog.
+    config.quota_refresh_enabled = existing.quota_refresh_enabled;
+    config.quota_refresh_interval_seconds = existing.quota_refresh_interval_seconds;
+    config.fast_mode_enabled = existing.fast_mode_enabled;
+    config.relay = existing.relay.clone();
 }
 
 fn runtime_settings_from_config(config: &CodexServerConfig) -> CodexRuntimeSettings {
@@ -762,19 +781,7 @@ pub async fn start_codex_server(
 
     // 合并已有配置，避免前端只传部分字段时覆盖现有配置
     if let Ok(existing) = get_or_load_codex_config(&app, state.inner()) {
-        if config.api_key.is_none() {
-            config.api_key = existing.api_key;
-        }
-        if config.pool_strategy.trim().is_empty() {
-            config.pool_strategy = existing.pool_strategy;
-        }
-        if config.selected_account_id.is_none() {
-            config.selected_account_id = existing.selected_account_id;
-        }
-        // Runtime settings are managed separately from server start/stop dialog.
-        config.quota_refresh_enabled = existing.quota_refresh_enabled;
-        config.quota_refresh_interval_seconds = existing.quota_refresh_interval_seconds;
-        config.fast_mode_enabled = existing.fast_mode_enabled;
+        merge_start_codex_server_config(&mut config, &existing);
     }
     normalize_access_fields(&mut config);
     normalize_server_port(&mut config);
@@ -1674,6 +1681,35 @@ mod tests {
         assert_eq!(config.relay.public_base_url, "https://lingkong.xyz/v1");
         assert_eq!(config.relay.health_check_interval_seconds, 600);
         assert_eq!(config.relay.auto_repair_cooldown_seconds, 600);
+    }
+
+    #[test]
+    fn codex_relay_health_config_start_merge_preserves_existing_relay_settings() {
+        let mut incoming = CodexServerConfig::default();
+        let mut existing = CodexServerConfig::default();
+
+        existing.relay.public_base_url = "https://relay.example.com/v1".into();
+        existing.relay.host = Some("ubuntu@example.com".into());
+        existing.relay.remote_port = 29090;
+        existing.relay.local_port = 9766;
+        existing.relay.control_socket = Some("/tmp/atm-relay.sock".into());
+        existing.relay.health_check_interval_seconds = 1800;
+        existing.relay.auto_repair_enabled = false;
+        existing.relay.auto_repair_cooldown_seconds = 2400;
+
+        merge_start_codex_server_config(&mut incoming, &existing);
+
+        assert_eq!(incoming.relay, existing.relay);
+    }
+
+    #[test]
+    fn codex_relay_health_config_trims_public_base_url_before_validation() {
+        let mut config = CodexServerConfig::default();
+        config.relay.public_base_url = "  https://relay.example.com/v1  ".into();
+
+        normalize_runtime_fields(&mut config);
+
+        assert_eq!(config.relay.public_base_url, "https://relay.example.com/v1");
     }
 
     #[test]
