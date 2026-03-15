@@ -1790,6 +1790,8 @@ export default {
         logsTitle: '请求日志',
         monthlyTrend: '月度趋势（近30天）',
         monthlyTrendHint: '同一张图里按成员 / Key 展示最近 30 天请求和 Token。',
+        tokenShareTitle: 'Token 占比',
+        tokenShareHint: '按当前已选成员汇总同一 30 天窗口内的 Token 占比。',
         modelFilterPlaceholder: '模型筛选',
         accountFilterPlaceholder: '账号筛选',
         allStatus: '全部状态',

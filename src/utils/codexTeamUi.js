@@ -195,6 +195,43 @@ export const filterTeamSeriesBySelectedProfiles = (series, selectedProfileIds, p
     profiles
   })
 
+export const buildTokenShareSeries = (series) => {
+  if (!Array.isArray(series) || series.length === 0) {
+    return []
+  }
+
+  const tokenRows = series
+    .map((entry) => {
+      const tokens = Array.isArray(entry?.stats)
+        ? entry.stats.reduce((sum, point) => sum + Number(point?.tokens || 0), 0)
+        : 0
+
+      return {
+        profileId: normalizeProfileId(entry?.profileId),
+        profileName: String(entry?.profileName || entry?.name || entry?.profileId || '').trim(),
+        memberCode: String(entry?.memberCode || '').trim(),
+        roleTitle: String(entry?.roleTitle || '').trim(),
+        color: String(entry?.color || '#4c6ef5').trim() || '#4c6ef5',
+        tokens
+      }
+    })
+    .filter((entry) => entry.tokens > 0)
+
+  const totalTokens = tokenRows.reduce((sum, entry) => sum + entry.tokens, 0)
+  if (totalTokens <= 0) {
+    return []
+  }
+
+  return tokenRows
+    .map((entry) => ({
+      ...entry,
+      label: entry.memberCode || entry.profileName || entry.profileId,
+      memberLabel: [entry.profileName, entry.memberCode, entry.roleTitle].filter(Boolean).join(' · ') || entry.profileId,
+      percentage: Number(((entry.tokens / totalTokens) * 100).toFixed(1))
+    }))
+    .sort((left, right) => right.tokens - left.tokens)
+}
+
 export const buildAllMembersAccessBundle = ({ baseUrl, profiles }) => {
   const publicBaseUrl = String(baseUrl || '').trim()
   const items = Array.isArray(profiles) ? profiles : []

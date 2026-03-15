@@ -1797,6 +1797,8 @@ export default {
         logsTitle: 'Request Logs',
         monthlyTrend: 'Monthly Trend (Last 30 Days)',
         monthlyTrendHint: 'Shows the last 30 days of requests and tokens split by member and key.',
+        tokenShareTitle: 'Token Share',
+        tokenShareHint: 'Aggregates the selected members by total tokens for the same 30-day window.',
         modelFilterPlaceholder: 'Filter model',
         accountFilterPlaceholder: 'Filter account',
         allStatus: 'All Status',

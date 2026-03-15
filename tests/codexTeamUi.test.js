@@ -292,6 +292,62 @@ test('buildSelectedProfileSeries fills zero-value stats for selected members wit
   assert.equal(output[1].color, '#0ea5e9')
 })
 
+test('buildTokenShareSeries aggregates selected member tokens and excludes zero-token slices', async () => {
+  const { buildTokenShareSeries } = await loadModule()
+
+  const output = buildTokenShareSeries([
+    {
+      profileId: 'codex-jdd',
+      profileName: '姜大大',
+      memberCode: 'jdd',
+      roleTitle: '产品与方法论',
+      color: '#4c6ef5',
+      stats: [
+        { date: '2026-03-13', requests: 2, tokens: 200 },
+        { date: '2026-03-14', requests: 1, tokens: 100 }
+      ]
+    },
+    {
+      profileId: 'codex-jqw',
+      profileName: '佳琪',
+      memberCode: 'jqw',
+      roleTitle: '架构与趋势',
+      color: '#0ea5e9',
+      stats: [
+        { date: '2026-03-13', requests: 1, tokens: 300 },
+        { date: '2026-03-14', requests: 1, tokens: 0 }
+      ]
+    },
+    {
+      profileId: 'codex-cr',
+      profileName: 'CR',
+      memberCode: 'cr',
+      roleTitle: '执行实验',
+      color: '#f08c00',
+      stats: [
+        { date: '2026-03-13', requests: 0, tokens: 0 },
+        { date: '2026-03-14', requests: 0, tokens: 0 }
+      ]
+    }
+  ])
+
+  assert.deepEqual(
+    output.map(entry => entry.memberCode),
+    ['jdd', 'jqw']
+  )
+  assert.deepEqual(
+    output.map(entry => entry.tokens),
+    [300, 300]
+  )
+  assert.deepEqual(
+    output.map(entry => entry.percentage),
+    [50, 50]
+  )
+  assert.equal(output[0].label, 'jdd')
+  assert.equal(output[0].memberLabel, '姜大大 · jdd · 产品与方法论')
+  assert.equal(output[1].color, '#0ea5e9')
+})
+
 test('buildAllMembersAccessBundle emits one public bundle block per member', async () => {
   const { buildAllMembersAccessBundle } = await loadModule()
 

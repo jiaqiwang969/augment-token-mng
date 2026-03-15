@@ -64,3 +64,12 @@ test('CodexServerDialog restores table-first member focus with detail card below
   assert.match(source, /codexDialog\.selectedMemberHint/)
   assert.doesNotMatch(source, /setFocusedMember\(profile\.id,\s*close\)/, 'focused member should no longer rely on a dropdown close handler')
 })
+
+test('CodexServerDialog renders a token-share pie chart from filtered member series', async () => {
+  const source = await readDialogSource()
+
+  assert.match(source, /import CodexUsagePieChart from '@\/components\/openai\/CodexUsagePieChart\.vue'/)
+  assert.match(source, /buildTokenShareSeries/)
+  assert.match(source, /const tokenShareSeries = computed\(\(\) =>\s*buildTokenShareSeries\(filteredDailyStatsSeries\.value\)\)/)
+  assert.match(source, /<CodexUsagePieChart :chart-data="tokenShareSeries" \/>/)
+})

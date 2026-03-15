@@ -246,8 +246,9 @@
                   </button>
                 </div>
               </div>
-              <div class="mt-3">
+              <div class="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.8fr)_minmax(280px,1fr)]">
                 <CodexUsageChart :loading="isLoadingChart" :chart-data="filteredDailyStatsSeries" />
+                <CodexUsagePieChart :chart-data="tokenShareSeries" />
               </div>
             </div>
 
@@ -676,10 +677,12 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import FloatingDropdown from '@/components/common/FloatingDropdown.vue'
 import CodexTeamMemberEditorModal from '@/components/openai/CodexTeamMemberEditorModal.vue'
 import CodexUsageChart from '@/components/openai/CodexUsageChart.vue'
+import CodexUsagePieChart from '@/components/openai/CodexUsagePieChart.vue'
 import CodexQuickSwitchModal from '@/components/openai/CodexQuickSwitchModal.vue'
 import {
   buildAllMembersAccessBundle,
   buildSelectedProfileSeries,
+  buildTokenShareSeries,
   buildTeamMemberRows,
   resolveFocusedProfileId,
   syncSelectedProfileIds
@@ -759,6 +762,7 @@ const filteredDailyStatsSeries = computed(() =>
     profiles: memberTableRows.value
   })
 )
+const tokenShareSeries = computed(() => buildTokenShareSeries(filteredDailyStatsSeries.value))
 const selectedMemberCount = computed(() => selectedMemberProfileIds.value.length)
 const allMembersSelected = computed(() =>
   memberTableRows.value.length > 0 && selectedMemberCount.value === memberTableRows.value.length
