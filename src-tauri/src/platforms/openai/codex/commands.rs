@@ -10,7 +10,8 @@ use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
 use super::archive::{
-    ArchiveSessionConfidence, export_archive_session_jsonl, materialize_archive_session_file,
+    ArchiveSessionConfidence, export_archive_session_jsonl,
+    rebuild_materialized_archive_session_files,
 };
 use super::archive_storage::ArchiveSessionRow;
 use super::logger::RequestLogger;
@@ -1423,25 +1424,14 @@ pub async fn materialize_codex_archive_session_files(
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
-    let session_ids = if let Some(archive_session_id) = archive_session_id {
-        vec![archive_session_id]
-    } else {
-        storage
-            .list_sessions()?
-            .into_iter()
-            .map(|session| session.archive_session_id)
-            .collect()
-    };
-
-    let mut output_paths = Vec::with_capacity(session_ids.len());
-    for session_id in session_ids {
-        let path = materialize_archive_session_file(
-            storage.as_ref(),
-            app_data_dir.as_path(),
-            &session_id,
-        )?;
-        output_paths.push(path.display().to_string());
-    }
+    let output_paths = rebuild_materialized_archive_session_files(
+        storage.as_ref(),
+        app_data_dir.as_path(),
+        archive_session_id.as_deref(),
+    )?
+    .into_iter()
+    .map(|path| path.display().to_string())
+    .collect::<Vec<_>>();
 
     Ok(CodexArchiveMaterializationResult {
         exported_count: output_paths.len(),

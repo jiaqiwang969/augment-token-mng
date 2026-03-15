@@ -272,6 +272,85 @@ pub fn materialize_archive_session_file(
     Ok(output_path)
 }
 
+pub fn rebuild_materialized_archive_session_files(
+    storage: &CodexArchiveStorage,
+    app_data_dir: &Path,
+    archive_session_id: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    if archive_session_id.is_none() {
+        cleanup_legacy_materialized_archive_tree(app_data_dir)?;
+    }
+
+    let session_ids = if let Some(archive_session_id) = archive_session_id {
+        vec![archive_session_id.to_string()]
+    } else {
+        storage
+            .list_sessions()?
+            .into_iter()
+            .map(|session| session.archive_session_id)
+            .collect()
+    };
+
+    let mut output_paths = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        output_paths.push(materialize_archive_session_file(
+            storage,
+            app_data_dir,
+            &session_id,
+        )?);
+    }
+
+    Ok(output_paths)
+}
+
+fn cleanup_legacy_materialized_archive_tree(app_data_dir: &Path) -> Result<(), String> {
+    let archive_root = codex_archive_materialized_root(app_data_dir);
+    if !archive_root.exists() {
+        return Ok(());
+    }
+
+    let entries = std::fs::read_dir(&archive_root)
+        .map_err(|e| format!("Failed to scan archive export root: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read archive export entry: {}", e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect archive export entry type: {}", e))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        if !looks_like_legacy_archive_year_dir(name) {
+            continue;
+        }
+
+        std::fs::remove_dir_all(entry.path())
+            .map_err(|e| format!("Failed to remove legacy archive export tree: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn codex_archive_materialized_root(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("archives").join("codex-sessions")
+}
+
+fn looks_like_legacy_archive_year_dir(name: &str) -> bool {
+    if name.len() != 4 || !name.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+
+    name.parse::<u16>()
+        .map(|year| (1970..=2099).contains(&year))
+        .unwrap_or(false)
+}
+
 fn serialize_archive_event(value: Value) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| format!("Failed to serialize archive event: {}", e))
 }
@@ -404,9 +483,7 @@ fn archive_session_materialized_path(app_data_dir: &Path, session: &ArchiveSessi
         archive_path_segment(Some(session.archive_session_id.as_str()), "archive-session")
     );
 
-    app_data_dir
-        .join("archives")
-        .join("codex-sessions")
+    codex_archive_materialized_root(app_data_dir)
         .join(owner_segment)
         .join(session_segment)
         .join(dt.format("%Y").to_string())
@@ -662,7 +739,8 @@ mod tests {
         ArchiveSessionConfidence, ArchiveTurnCapture, ArchiveTurnContext, ArchiveUsageStats,
         derive_archive_session_identity, derive_archive_session_identity_from_markers,
         export_archive_session_jsonl, extract_explicit_session_id, extract_prompt_cache_key,
-        extract_turn_metadata, materialize_archive_session_file,
+        extract_turn_metadata, looks_like_legacy_archive_year_dir,
+        materialize_archive_session_file, rebuild_materialized_archive_session_files,
     };
     use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
     use bytes::Bytes;
@@ -1095,5 +1173,84 @@ mod tests {
                 "archives/codex-sessions/codex-jdd/repo_atm_archive/1970/01/01/rollout-1970-01-01T00-16-40Z-codex-jdd_prompt-cache_prompt-a.jsonl"
             )
         );
+    }
+
+    #[test]
+    fn codex_archive_export_rebuild_cleans_legacy_top_level_layout() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexArchiveStorage::new(temp_dir.path().join("storage")).unwrap();
+
+        let mut capture = seed_capture(Some("prompt-a"), Some("turn-1"));
+        capture.append_response_chunk(Bytes::from_static(br#"{"id":"resp_1"}"#));
+        capture
+            .finish_completed("success", ArchiveUsageStats::default(), &storage)
+            .unwrap();
+
+        let legacy_path = temp_dir.path().join(
+            "archives/codex-sessions/1970/01/01/rollout-1970-01-01T00-16-40Z-codex-jdd_prompt-cache_prompt-a.jsonl",
+        );
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, b"legacy").unwrap();
+
+        let output_paths =
+            rebuild_materialized_archive_session_files(&storage, temp_dir.path(), None).unwrap();
+
+        assert_eq!(output_paths.len(), 1);
+        assert!(!legacy_path.exists(), "legacy export should be removed");
+        assert!(
+            !temp_dir
+                .path()
+                .join("archives/codex-sessions/1970")
+                .exists()
+        );
+        assert_eq!(
+            output_paths[0],
+            temp_dir.path().join(
+                "archives/codex-sessions/codex-jdd/prompt-a/1970/01/01/rollout-1970-01-01T00-16-40Z-codex-jdd_prompt-cache_prompt-a.jsonl"
+            )
+        );
+        assert!(output_paths[0].exists());
+    }
+
+    #[test]
+    fn codex_archive_export_rebuild_single_session_keeps_legacy_top_level_layout() {
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexArchiveStorage::new(temp_dir.path().join("storage")).unwrap();
+
+        let mut capture = seed_capture(Some("prompt-a"), Some("turn-1"));
+        capture.append_response_chunk(Bytes::from_static(br#"{"id":"resp_1"}"#));
+        capture
+            .finish_completed("success", ArchiveUsageStats::default(), &storage)
+            .unwrap();
+
+        let legacy_path = temp_dir.path().join(
+            "archives/codex-sessions/1970/01/01/rollout-1970-01-01T00-16-40Z-codex-jdd_prompt-cache_prompt-a.jsonl",
+        );
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, b"legacy").unwrap();
+
+        let output_paths = rebuild_materialized_archive_session_files(
+            &storage,
+            temp_dir.path(),
+            Some("codex-jdd:prompt-cache:prompt-a"),
+        )
+        .unwrap();
+
+        assert_eq!(output_paths.len(), 1);
+        assert!(
+            legacy_path.exists(),
+            "single-session export should not cleanup legacy layout"
+        );
+        assert!(output_paths[0].exists());
+    }
+
+    #[test]
+    fn codex_archive_export_rebuild_only_matches_realistic_legacy_year_dirs() {
+        assert!(looks_like_legacy_archive_year_dir("2026"));
+        assert!(looks_like_legacy_archive_year_dir("1970"));
+        assert!(!looks_like_legacy_archive_year_dir("1234"));
+        assert!(!looks_like_legacy_archive_year_dir("2100"));
+        assert!(!looks_like_legacy_archive_year_dir("abcd"));
+        assert!(!looks_like_legacy_archive_year_dir("20261"));
     }
 }
