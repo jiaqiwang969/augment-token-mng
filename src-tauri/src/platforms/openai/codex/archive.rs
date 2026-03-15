@@ -74,6 +74,10 @@ struct CodexTurnMetadataHeader {
     turn_id: Option<String>,
     #[serde(default)]
     sandbox: Option<String>,
+    #[serde(default, alias = "sessionId")]
+    session_id: Option<String>,
+    #[serde(default, alias = "projectId")]
+    project_id: Option<String>,
 }
 
 pub fn extract_turn_metadata(headers: &HeaderMap) -> ArchiveRequestMarkers {
@@ -90,7 +94,10 @@ pub fn extract_turn_metadata(headers: &HeaderMap) -> ArchiveRequestMarkers {
             .as_ref()
             .and_then(|value| normalize_marker(value.sandbox.as_deref())),
         prompt_cache_key: None,
-        explicit_session_id: None,
+        explicit_session_id: metadata.as_ref().and_then(|value| {
+            normalize_marker(value.session_id.as_deref())
+                .or_else(|| normalize_marker(value.project_id.as_deref()))
+        }),
     }
 }
 
@@ -104,11 +111,43 @@ pub fn extract_prompt_cache_key(body: &Bytes) -> Option<String> {
     )
 }
 
+pub fn extract_explicit_session_id(headers: &HeaderMap, body: &Bytes) -> Option<String> {
+    extract_turn_metadata(headers)
+        .explicit_session_id
+        .or_else(|| extract_named_header_marker(headers, &["X-Session-Id", "X-Codex-Session-Id"]))
+        .or_else(|| extract_named_header_marker(headers, &["X-Project-Id", "X-Codex-Project-Id"]))
+        .or_else(|| extract_explicit_session_id_from_body(body))
+}
+
 pub fn derive_archive_session_identity(
     gateway_profile_id: &str,
     prompt_cache_key: Option<&str>,
     turn_id: Option<&str>,
 ) -> DerivedArchiveSession {
+    derive_archive_session_identity_from_markers(
+        gateway_profile_id,
+        None,
+        prompt_cache_key,
+        turn_id,
+    )
+}
+
+pub fn derive_archive_session_identity_from_markers(
+    gateway_profile_id: &str,
+    explicit_session_id: Option<&str>,
+    prompt_cache_key: Option<&str>,
+    turn_id: Option<&str>,
+) -> DerivedArchiveSession {
+    if let Some(explicit_session_id) = normalize_marker(explicit_session_id) {
+        return DerivedArchiveSession {
+            synthetic_session_key: format!(
+                "{}:explicit:{}",
+                gateway_profile_id, explicit_session_id
+            ),
+            confidence: ArchiveSessionConfidence::High,
+        };
+    }
+
     if let Some(prompt_cache_key) = normalize_marker(prompt_cache_key) {
         return DerivedArchiveSession {
             synthetic_session_key: format!(
@@ -130,6 +169,31 @@ pub fn derive_archive_session_identity(
         synthetic_session_key: format!("{}:singleton:unknown", gateway_profile_id),
         confidence: ArchiveSessionConfidence::Low,
     }
+}
+
+fn extract_named_header_marker(headers: &HeaderMap, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| headers.get(*name))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| normalize_marker(Some(value)))
+}
+
+fn extract_explicit_session_id_from_body(body: &Bytes) -> Option<String> {
+    let root: serde_json::Value = serde_json::from_slice(body).ok()?;
+
+    [
+        "/metadata/session_id",
+        "/metadata/sessionId",
+        "/metadata/project_id",
+        "/metadata/projectId",
+        "/session_id",
+        "/sessionId",
+        "/project_id",
+        "/projectId",
+    ]
+    .iter()
+    .find_map(|pointer| normalize_marker(root.pointer(pointer).and_then(serde_json::Value::as_str)))
 }
 
 fn normalize_marker(value: Option<&str>) -> Option<String> {
@@ -596,7 +660,8 @@ fn should_redact_archive_header(header_name: &str) -> bool {
 mod tests {
     use super::{
         ArchiveSessionConfidence, ArchiveTurnCapture, ArchiveTurnContext, ArchiveUsageStats,
-        derive_archive_session_identity, export_archive_session_jsonl, extract_prompt_cache_key,
+        derive_archive_session_identity, derive_archive_session_identity_from_markers,
+        export_archive_session_jsonl, extract_explicit_session_id, extract_prompt_cache_key,
         extract_turn_metadata, materialize_archive_session_file,
     };
     use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
@@ -668,6 +733,24 @@ mod tests {
     }
 
     #[test]
+    fn codex_archive_marker_extracts_explicit_session_id_from_turn_metadata_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Codex-Turn-Metadata",
+            HeaderValue::from_static(
+                r#"{"turn_id":"turn-1","sandbox":"seatbelt","session_id":"repo:atm/archive"}"#,
+            ),
+        );
+
+        let markers = extract_turn_metadata(&headers);
+
+        assert_eq!(
+            markers.explicit_session_id.as_deref(),
+            Some("repo:atm/archive")
+        );
+    }
+
+    #[test]
     fn codex_archive_marker_extracts_prompt_cache_key_from_responses_body() {
         let body = Bytes::from_static(
             br#"{
@@ -682,6 +765,48 @@ mod tests {
         assert_eq!(
             prompt_cache_key.as_deref(),
             Some("019cec64-a5e3-7950-b0eb-81ff139811d4")
+        );
+    }
+
+    #[test]
+    fn codex_archive_marker_extracts_explicit_session_id_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-Id", HeaderValue::from_static("repo:atm/archive"));
+
+        let explicit_session_id = extract_explicit_session_id(&headers, &Bytes::from_static(b"{}"));
+
+        assert_eq!(explicit_session_id.as_deref(), Some("repo:atm/archive"));
+    }
+
+    #[test]
+    fn codex_archive_marker_extracts_project_marker_from_body_metadata() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(
+            br#"{
+                "model":"gpt-5.4",
+                "metadata":{"project_id":"repo:atm/archive"},
+                "input":"hello"
+            }"#,
+        );
+
+        let explicit_session_id = extract_explicit_session_id(&headers, &body);
+
+        assert_eq!(explicit_session_id.as_deref(), Some("repo:atm/archive"));
+    }
+
+    #[test]
+    fn codex_archive_marker_derive_session_prefers_explicit_marker() {
+        let identity = derive_archive_session_identity_from_markers(
+            "codex-jdd",
+            Some("repo:atm/archive"),
+            Some("019cec64-a5e3-7950-b0eb-81ff139811d4"),
+            Some("019cec64-fd30-7b93-a518-bc6b90a6023b"),
+        );
+
+        assert_eq!(identity.confidence, ArchiveSessionConfidence::High);
+        assert_eq!(
+            identity.synthetic_session_key,
+            "codex-jdd:explicit:repo:atm/archive"
         );
     }
 

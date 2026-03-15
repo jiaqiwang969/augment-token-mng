@@ -15,7 +15,8 @@ use warp::{Filter, Rejection, Reply};
 
 use super::{
     archive::{
-        ArchiveTurnCapture, ArchiveTurnContext, ArchiveUsageStats, derive_archive_session_identity,
+        ArchiveTurnCapture, ArchiveTurnContext, ArchiveUsageStats,
+        derive_archive_session_identity_from_markers, extract_explicit_session_id,
         extract_prompt_cache_key, extract_turn_metadata,
     },
     archive_storage::CodexArchiveStorage,
@@ -1269,13 +1270,15 @@ fn build_archive_turn_capture(
     let metadata = build_gateway_profile_log_metadata(gateway_profile);
     let mut markers = extract_turn_metadata(headers);
     markers.prompt_cache_key = extract_prompt_cache_key(body);
+    markers.explicit_session_id = extract_explicit_session_id(headers, body);
 
     let gateway_profile_id = metadata
         .gateway_profile_id
         .clone()
         .unwrap_or_else(|| "legacy".to_string());
-    let session = derive_archive_session_identity(
+    let session = derive_archive_session_identity_from_markers(
         &gateway_profile_id,
+        markers.explicit_session_id.as_deref(),
         markers.prompt_cache_key.as_deref(),
         markers.turn_id.as_deref(),
     );
@@ -1289,7 +1292,7 @@ fn build_archive_turn_capture(
         member_code: metadata.member_code.clone(),
         display_label: metadata.display_label.clone(),
         prompt_cache_key: markers.prompt_cache_key.clone(),
-        explicit_session_id: None,
+        explicit_session_id: markers.explicit_session_id.clone(),
         markers,
         session,
         request_path: path.to_string(),
@@ -1578,6 +1581,11 @@ impl warp::reject::Reject for CodexRejection {}
 mod tests {
     use super::*;
     use crate::core::gateway_access::{GatewayAccessProfile, GatewayTarget};
+    use crate::platforms::openai::codex::archive::ArchiveSessionConfidence;
+    use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
+    use bytes::Bytes;
+    use tempfile::tempdir;
+    use warp::http::HeaderValue;
 
     #[test]
     fn build_request_log_captures_member_identity_fields() {
@@ -1620,5 +1628,65 @@ mod tests {
         assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
         assert_eq!(row["api_key_suffix"], "a4f29c7e");
         assert_eq!(row["color"], "#4c6ef5");
+    }
+
+    #[test]
+    fn build_archive_turn_capture_prefers_explicit_project_marker() {
+        let profile = GatewayAccessProfile {
+            id: "codex-jdd".to_string(),
+            name: "姜大大".to_string(),
+            target: GatewayTarget::Codex,
+            api_key: "sk-team-jdd-a4f29c7e".to_string(),
+            enabled: true,
+            member_code: Some("jdd".to_string()),
+            role_title: Some("产品与方法论".to_string()),
+            persona_summary: Some("高频输出，偏产品与方法论视角".to_string()),
+            color: Some("#4c6ef5".to_string()),
+            notes: Some("核心体验 owner".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Codex-Turn-Metadata",
+            HeaderValue::from_static(r#"{"turn_id":"turn-1","sandbox":"seatbelt"}"#),
+        );
+        let body = Bytes::from_static(
+            br#"{
+                "model":"gpt-5.4",
+                "prompt_cache_key":"task9-archive-20260315-0955",
+                "metadata":{"project_id":"repo:atm/archive"},
+                "input":"hello"
+            }"#,
+        );
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexArchiveStorage::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let capture = build_archive_turn_capture(
+            "/v1/responses",
+            &Method::POST,
+            &headers,
+            &body,
+            "openai-responses",
+            "gpt-5.4",
+            Some(&profile),
+        );
+        capture
+            .finish_completed("success", ArchiveUsageStats::default(), &storage)
+            .unwrap();
+
+        let turn = storage.get_turn("turn-1").unwrap().unwrap();
+
+        assert_eq!(
+            turn.archive_session_id,
+            "codex-jdd:explicit:repo:atm/archive"
+        );
+        assert_eq!(
+            turn.explicit_session_id.as_deref(),
+            Some("repo:atm/archive")
+        );
+        assert_eq!(
+            turn.prompt_cache_key.as_deref(),
+            Some("task9-archive-20260315-0955")
+        );
+        assert_eq!(turn.confidence, ArchiveSessionConfidence::High);
     }
 }
