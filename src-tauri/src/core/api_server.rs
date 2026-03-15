@@ -138,6 +138,7 @@ pub async fn start_api_server_cmd(
             codex_server_config: state.codex_server_config.clone(),
             gateway_access_profiles: state.gateway_access_profiles.clone(),
             codex_log_storage: state.codex_log_storage.clone(),
+            codex_archive_storage: state.codex_archive_storage.clone(),
             proxy_config: state.proxy_config.clone(),
             augment_sidecar: state.augment_sidecar.clone(),
         }),

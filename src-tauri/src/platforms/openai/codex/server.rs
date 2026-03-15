@@ -14,6 +14,12 @@ use warp::http::{HeaderMap, Method, StatusCode};
 use warp::{Filter, Rejection, Reply};
 
 use super::{
+    archive::{
+        ArchiveTurnCapture, ArchiveTurnContext, ArchiveUsageStats,
+        derive_archive_session_identity_from_markers, extract_explicit_session_id,
+        extract_prompt_cache_key, extract_turn_metadata,
+    },
+    archive_storage::CodexArchiveStorage,
     executor::{CodexExecutor, ForwardMeta, ForwardRequest},
     logger::RequestLogger,
     models::{CodexError, RequestLog},
@@ -166,7 +172,7 @@ pub fn codex_routes_from_state(
         .and(state_filter.clone())
         .and_then(|state: Arc<AppState>| async move {
             ensure_codex_enabled(&state)?;
-            let (pool, _, _, _) = get_runtime_or_reject(&state)?;
+            let (pool, _, _, _, _) = get_runtime_or_reject(&state)?;
             Result::<_, Rejection>::Ok(warp::reply::json(&pool.status().await))
         });
 
@@ -221,10 +227,19 @@ async fn handle_passthrough_internal(
         validate_api_key(&state, &headers)?;
     }
 
-    let (pool, executor, logger, storage) = get_runtime_or_reject(&state)?;
+    let (pool, executor, logger, storage, archive_storage) = get_runtime_or_reject(&state)?;
     let request_format = infer_request_format(&path).to_string();
     let request_model =
         extract_model_from_json_bytes(&body).unwrap_or_else(|| "unknown".to_string());
+    let mut archive_capture = build_archive_turn_capture(
+        &path,
+        &method,
+        &headers,
+        &body,
+        &request_format,
+        &request_model,
+        gateway_profile.as_ref(),
+    );
 
     let is_responses = request_format == "openai-responses";
 
@@ -288,6 +303,8 @@ async fn handle_passthrough_internal(
         let upstream_status = StatusCode::from_u16(upstream_response.status().as_u16())
             .unwrap_or(StatusCode::BAD_GATEWAY);
         let upstream_headers = upstream_response.headers().clone();
+        archive_capture.set_selected_account(meta.account_id.clone(), meta.account_email.clone());
+        archive_capture.set_response_headers(&upstream_headers);
 
         // 如果是 402/403，异步更新数据库中的 forbidden 状态
         if upstream_status == StatusCode::PAYMENT_REQUIRED
@@ -310,6 +327,14 @@ async fn handle_passthrough_internal(
                 Err(err) => {
                     pool.record_failure(&meta.account_id, None).await;
                     let err_text = format!("Failed to read upstream response body: {}", err);
+                    if let Some(archive_store) = archive_storage.as_ref() {
+                        let _ = archive_capture.finish_response(
+                            "error",
+                            Some(err_text.clone()),
+                            ArchiveUsageStats::default(),
+                            archive_store.as_ref(),
+                        );
+                    }
                     add_failed_log(
                         logger,
                         storage,
@@ -364,10 +389,23 @@ async fn handle_passthrough_internal(
                     "error"
                 },
                 usage,
-                error_message,
+                error_message.clone(),
                 gateway_profile.as_ref(),
             );
             record_log(logger, storage, log).await;
+            if let Some(archive_store) = archive_storage.as_ref() {
+                archive_capture.append_response_chunk(peek_bytes.clone());
+                let _ = archive_capture.finish_response(
+                    if upstream_status.is_success() {
+                        "success"
+                    } else {
+                        "error"
+                    },
+                    error_message.clone(),
+                    archive_usage_from(usage),
+                    archive_store.as_ref(),
+                );
+            }
 
             let response = build_buffered_response(upstream_status, &upstream_headers, peek_bytes)
                 .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
@@ -379,12 +417,15 @@ async fn handle_passthrough_internal(
             if stream_forced {
                 let response = destream_responses_sse(
                     upstream_status,
+                    &upstream_headers,
                     upstream_response,
                     pool,
                     logger,
                     storage,
+                    archive_storage.clone(),
                     meta,
                     request_model,
+                    archive_capture,
                     gateway_profile.clone(),
                 )
                 .await
@@ -399,8 +440,10 @@ async fn handle_passthrough_internal(
                 pool,
                 logger,
                 storage,
+                archive_storage.clone(),
                 meta,
                 request_model,
+                archive_capture,
                 gateway_profile.clone(),
             )
             .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
@@ -412,6 +455,14 @@ async fn handle_passthrough_internal(
             Err(err) => {
                 pool.record_failure(&meta.account_id, None).await;
                 let err_text = format!("Failed to read upstream response body: {}", err);
+                if let Some(archive_store) = archive_storage.as_ref() {
+                    let _ = archive_capture.finish_response(
+                        "error",
+                        Some(err_text.clone()),
+                        ArchiveUsageStats::default(),
+                        archive_store.as_ref(),
+                    );
+                }
                 add_failed_log(
                     logger,
                     storage,
@@ -452,10 +503,23 @@ async fn handle_passthrough_internal(
                 "error"
             },
             usage,
-            error_message,
+            error_message.clone(),
             gateway_profile.as_ref(),
         );
         record_log(logger, storage, log).await;
+        if let Some(archive_store) = archive_storage.as_ref() {
+            archive_capture.append_response_chunk(upstream_bytes.clone());
+            let _ = archive_capture.finish_response(
+                if upstream_status.is_success() {
+                    "success"
+                } else {
+                    "error"
+                },
+                error_message.clone(),
+                archive_usage_from(usage),
+                archive_store.as_ref(),
+            );
+        }
 
         let response = build_buffered_response(upstream_status, &upstream_headers, upstream_bytes)
             .map_err(|e| warp::reject::custom(CodexRejection::InternalError(e.to_string())))?;
@@ -467,27 +531,36 @@ async fn handle_passthrough_internal(
 /// 以普通 JSON 返回给不需要流式的客户端。
 async fn destream_responses_sse(
     status: StatusCode,
+    headers: &HeaderMap,
     response: reqwest::Response,
     pool: Arc<CodexPool>,
     logger: Arc<RwLock<RequestLogger>>,
     storage: Option<Arc<CodexLogStorage>>,
+    archive_storage: Option<Arc<CodexArchiveStorage>>,
     meta: ForwardMeta,
     request_model: String,
+    mut archive_capture: ArchiveTurnCapture,
     gateway_profile: Option<GatewayAccessProfile>,
 ) -> Result<Response<Body>, String> {
     let mut stream = response.bytes_stream();
     let mut extractor = SseMetricsExtractor::default();
     let mut all_data = String::new();
+    archive_capture.set_response_headers(headers);
 
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(bytes) => {
                 extractor.ingest_chunk(&bytes);
                 all_data.push_str(&String::from_utf8_lossy(&bytes));
+                archive_capture.append_response_chunk(bytes.clone());
             }
             Err(err) => {
                 let err_text = format!("Failed to read upstream stream: {}", err);
                 pool.record_failure(&meta.account_id, None).await;
+                if let Some(archive_store) = archive_storage.as_ref() {
+                    let _ = archive_capture
+                        .finish_with_stream_error(err_text.clone(), archive_store.as_ref());
+                }
                 return Err(err_text);
             }
         }
@@ -520,10 +593,22 @@ async fn destream_responses_sse(
             "error"
         },
         usage,
-        error_message,
+        error_message.clone(),
         gateway_profile.as_ref(),
     );
     record_log(logger, storage, log).await;
+    if let Some(archive_store) = archive_storage.as_ref() {
+        let _ = archive_capture.finish_response(
+            if status.is_success() {
+                "success"
+            } else {
+                "error"
+            },
+            error_message.clone(),
+            archive_usage_from(usage),
+            archive_store.as_ref(),
+        );
+    }
 
     // 从 SSE 事件中提取 response.completed 的 response 对象
     let response_json = extract_completed_response(&all_data)
@@ -610,8 +695,10 @@ fn build_streaming_response_with_metrics(
     pool: Arc<CodexPool>,
     logger: Arc<RwLock<RequestLogger>>,
     storage: Option<Arc<CodexLogStorage>>,
+    archive_storage: Option<Arc<CodexArchiveStorage>>,
     meta: ForwardMeta,
     request_model: String,
+    mut archive_capture: ArchiveTurnCapture,
     gateway_profile: Option<GatewayAccessProfile>,
 ) -> Result<Response<Body>, String> {
     let mut builder = Response::builder().status(status);
@@ -624,21 +711,30 @@ fn build_streaming_response_with_metrics(
 
     let mut upstream_stream = response.bytes_stream();
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    archive_capture.set_response_headers(headers);
 
     tokio::spawn(async move {
         let mut extractor = SseMetricsExtractor::default();
+        let mut stream_interrupted = false;
+        let mut stream_error: Option<String> = None;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     extractor.ingest_chunk(&bytes);
+                    archive_capture.append_response_chunk(bytes.clone());
                     if tx.send(Ok(bytes)).await.is_err() {
+                        stream_interrupted = true;
+                        stream_error =
+                            Some("Client disconnected before stream completion".to_string());
                         break;
                     }
                 }
                 Err(err) => {
                     let err_text = format!("Failed to read upstream stream chunk: {}", err);
                     extractor.error_message.get_or_insert(err_text.clone());
+                    stream_interrupted = true;
+                    stream_error = Some(err_text.clone());
                     let _ = tx
                         .send(Err(std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -667,6 +763,27 @@ fn build_streaming_response_with_metrics(
         } else {
             extractor.error_message
         };
+        if let Some(archive_store) = archive_storage.as_ref() {
+            let _ = if stream_interrupted {
+                archive_capture.finish_with_stream_error(
+                    stream_error
+                        .clone()
+                        .unwrap_or_else(|| "Stream interrupted".to_string()),
+                    archive_store.as_ref(),
+                )
+            } else {
+                archive_capture.finish_response(
+                    if status.is_success() {
+                        "success"
+                    } else {
+                        "error"
+                    },
+                    error_message.clone(),
+                    archive_usage_from(usage),
+                    archive_store.as_ref(),
+                )
+            };
+        }
         let log = build_request_log(
             &meta,
             log_model,
@@ -1141,6 +1258,61 @@ fn build_gateway_profile_log_metadata(
     }
 }
 
+fn build_archive_turn_capture(
+    path: &str,
+    method: &Method,
+    headers: &HeaderMap,
+    body: &Bytes,
+    request_format: &str,
+    request_model: &str,
+    gateway_profile: Option<&GatewayAccessProfile>,
+) -> ArchiveTurnCapture {
+    let metadata = build_gateway_profile_log_metadata(gateway_profile);
+    let mut markers = extract_turn_metadata(headers);
+    markers.prompt_cache_key = extract_prompt_cache_key(body);
+    markers.explicit_session_id = extract_explicit_session_id(headers, body);
+
+    let gateway_profile_id = metadata
+        .gateway_profile_id
+        .clone()
+        .unwrap_or_else(|| "legacy".to_string());
+    let session = derive_archive_session_identity_from_markers(
+        &gateway_profile_id,
+        markers.explicit_session_id.as_deref(),
+        markers.prompt_cache_key.as_deref(),
+        markers.turn_id.as_deref(),
+    );
+
+    ArchiveTurnCapture::new(ArchiveTurnContext {
+        gateway_profile_id,
+        gateway_profile_name: metadata
+            .gateway_profile_name
+            .clone()
+            .or_else(|| Some("Legacy".to_string())),
+        member_code: metadata.member_code.clone(),
+        display_label: metadata.display_label.clone(),
+        prompt_cache_key: markers.prompt_cache_key.clone(),
+        explicit_session_id: markers.explicit_session_id.clone(),
+        markers,
+        session,
+        request_path: path.to_string(),
+        request_method: method.as_str().to_string(),
+        model: request_model.to_string(),
+        format: request_format.to_string(),
+        request_headers: headers.clone(),
+        request_body: body.clone(),
+        request_started_at: chrono::Utc::now().timestamp(),
+    })
+}
+
+fn archive_usage_from(usage: UsageStats) -> ArchiveUsageStats {
+    ArchiveUsageStats {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+    }
+}
+
 fn build_request_log(
     meta: &ForwardMeta,
     model: String,
@@ -1268,6 +1440,7 @@ fn get_runtime_or_reject(
         Arc<CodexExecutor>,
         Arc<RwLock<RequestLogger>>,
         Option<Arc<CodexLogStorage>>,
+        Option<Arc<CodexArchiveStorage>>,
     ),
     Rejection,
 > {
@@ -1295,8 +1468,9 @@ fn get_runtime_or_reject(
     })?;
 
     let storage = state.codex_log_storage.lock().unwrap().clone();
+    let archive_storage = state.codex_archive_storage.lock().unwrap().clone();
 
-    Ok((pool, executor, logger, storage))
+    Ok((pool, executor, logger, storage, archive_storage))
 }
 
 fn validate_api_key(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), Rejection> {
@@ -1407,6 +1581,11 @@ impl warp::reject::Reject for CodexRejection {}
 mod tests {
     use super::*;
     use crate::core::gateway_access::{GatewayAccessProfile, GatewayTarget};
+    use crate::platforms::openai::codex::archive::ArchiveSessionConfidence;
+    use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
+    use bytes::Bytes;
+    use tempfile::tempdir;
+    use warp::http::HeaderValue;
 
     #[test]
     fn build_request_log_captures_member_identity_fields() {
@@ -1449,5 +1628,65 @@ mod tests {
         assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
         assert_eq!(row["api_key_suffix"], "a4f29c7e");
         assert_eq!(row["color"], "#4c6ef5");
+    }
+
+    #[test]
+    fn build_archive_turn_capture_prefers_explicit_project_marker() {
+        let profile = GatewayAccessProfile {
+            id: "codex-jdd".to_string(),
+            name: "姜大大".to_string(),
+            target: GatewayTarget::Codex,
+            api_key: "sk-team-jdd-a4f29c7e".to_string(),
+            enabled: true,
+            member_code: Some("jdd".to_string()),
+            role_title: Some("产品与方法论".to_string()),
+            persona_summary: Some("高频输出，偏产品与方法论视角".to_string()),
+            color: Some("#4c6ef5".to_string()),
+            notes: Some("核心体验 owner".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Codex-Turn-Metadata",
+            HeaderValue::from_static(r#"{"turn_id":"turn-1","sandbox":"seatbelt"}"#),
+        );
+        let body = Bytes::from_static(
+            br#"{
+                "model":"gpt-5.4",
+                "prompt_cache_key":"task9-archive-20260315-0955",
+                "metadata":{"project_id":"repo:atm/archive"},
+                "input":"hello"
+            }"#,
+        );
+        let temp_dir = tempdir().unwrap();
+        let storage = CodexArchiveStorage::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let capture = build_archive_turn_capture(
+            "/v1/responses",
+            &Method::POST,
+            &headers,
+            &body,
+            "openai-responses",
+            "gpt-5.4",
+            Some(&profile),
+        );
+        capture
+            .finish_completed("success", ArchiveUsageStats::default(), &storage)
+            .unwrap();
+
+        let turn = storage.get_turn("turn-1").unwrap().unwrap();
+
+        assert_eq!(
+            turn.archive_session_id,
+            "codex-jdd:explicit:repo:atm/archive"
+        );
+        assert_eq!(
+            turn.explicit_session_id.as_deref(),
+            Some("repo:atm/archive")
+        );
+        assert_eq!(
+            turn.prompt_cache_key.as_deref(),
+            Some("task9-archive-20260315-0955")
+        );
+        assert_eq!(turn.confidence, ArchiveSessionConfidence::High);
     }
 }

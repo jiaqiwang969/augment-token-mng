@@ -44,6 +44,7 @@ use crate::data::subscription::SubscriptionDualStorage;
 use crate::features::mail::{gptmail, hme, hme_storage::HmeStorage, outlook};
 use crate::platforms::augment::models::AugmentOAuthState;
 use crate::platforms::augment::sidecar::AugmentSidecar;
+use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
 use crate::platforms::openai::codex::logger::RequestLogger;
 use crate::platforms::openai::codex::pool::CodexServerConfig;
 use crate::platforms::openai::codex::storage::CodexLogStorage;
@@ -99,6 +100,7 @@ pub struct AppState {
     pub gateway_access_profiles:
         Arc<Mutex<Option<crate::core::gateway_access::GatewayAccessProfiles>>>,
     pub codex_log_storage: Arc<Mutex<Option<Arc<CodexLogStorage>>>>,
+    pub codex_archive_storage: Arc<Mutex<Option<Arc<CodexArchiveStorage>>>>,
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
     // Augment API 代理 sidecar
     pub augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
@@ -282,6 +284,7 @@ pub fn run() {
                 codex_server_config: Arc::new(Mutex::new(None)),
                 gateway_access_profiles: Arc::new(Mutex::new(None)),
                 codex_log_storage: Arc::new(Mutex::new(None)),
+                codex_archive_storage: Arc::new(Mutex::new(None)),
                 proxy_config: Arc::new(Mutex::new(None)),
                 augment_sidecar: Arc::new(tokio::sync::Mutex::new({
                     // 查找 cliproxy-server 二进制：优先 bundle resources，其次开发态 resources，最后 /tmp fallback
@@ -472,6 +475,17 @@ pub fn run() {
                             eprintln!("❌ Failed to initialize Codex log storage: {}", e);
                         }
                     }
+
+                    match CodexArchiveStorage::new(app_data_dir.to_path_buf()) {
+                        Ok(storage) => {
+                            *state.codex_archive_storage.lock().unwrap() =
+                                Some(Arc::new(storage));
+                            println!("✅ Codex archive storage initialized successfully");
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to initialize Codex archive storage: {}", e);
+                        }
+                    }
                 }
 
                 // 启动 Codex 日志定期刷新任务
@@ -525,6 +539,7 @@ pub fn run() {
                         codex_server_config: state.codex_server_config.clone(),
                         gateway_access_profiles: state.gateway_access_profiles.clone(),
                         codex_log_storage: state.codex_log_storage.clone(),
+                        codex_archive_storage: state.codex_archive_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
                         augment_sidecar: state.augment_sidecar.clone(),
                     }),
@@ -911,6 +926,10 @@ pub fn run() {
             crate::platforms::openai::codex::commands::delete_codex_gateway_profile,
             crate::platforms::openai::codex::commands::get_codex_runtime_settings,
             crate::platforms::openai::codex::commands::set_codex_runtime_settings,
+            crate::platforms::openai::codex::commands::get_codex_archive_status,
+            crate::platforms::openai::codex::commands::list_codex_archive_sessions,
+            crate::platforms::openai::codex::commands::export_codex_archive_session,
+            crate::platforms::openai::codex::commands::materialize_codex_archive_session_files,
             // Codex 日志存储命令
             crate::platforms::openai::codex::commands::query_codex_logs_from_storage,
             crate::platforms::openai::codex::commands::get_codex_model_stats_from_storage,

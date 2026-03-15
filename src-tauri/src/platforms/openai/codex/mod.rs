@@ -6,6 +6,8 @@
 //! - 请求日志记录（内存 + 持久化）
 //! - Token 使用统计
 
+pub mod archive;
+pub mod archive_storage;
 pub mod commands;
 pub mod executor;
 pub mod logger;
@@ -15,6 +17,7 @@ pub mod server;
 pub mod storage;
 pub mod team_profiles;
 
+pub use archive_storage::{ArchiveSessionRow, ArchiveTurnRecord, CodexArchiveStorage};
 pub use executor::CodexExecutor;
 pub use logger::RequestLogger;
 pub use models::*;
