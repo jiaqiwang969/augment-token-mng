@@ -398,6 +398,16 @@ pub struct LogPage {
     pub items: Vec<RequestLog>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSummary {
+    pub total_requests: u64,
+    pub success_requests: u64,
+    pub error_requests: u64,
+    pub total_tokens: u64,
+    pub success_rate: f64,
+}
+
 // ==================== 错误处理 ====================
 
 #[derive(Debug, thiserror::Error)]

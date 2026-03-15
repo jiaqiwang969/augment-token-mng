@@ -13,6 +13,7 @@ dist/
 .vite/
 nul
 /temp/
+.env.antigravity
 .env.relay
 src-tauri/resources/cliproxy-server
 sidecars/cliproxy/apps/server-go/cli-proxy-api

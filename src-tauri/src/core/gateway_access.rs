@@ -14,6 +14,7 @@ const LEGACY_CODEX_CONFIG_FILE: &str = "openai_codex_config.json";
 pub enum GatewayTarget {
     Codex,
     Augment,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +396,67 @@ mod tests {
             profiles.first_enabled_api_key_for_target(GatewayTarget::Augment),
             Some("sk-augment".to_string())
         );
+    }
+
+    #[test]
+    fn gateway_access_serializes_and_deserializes_antigravity_target() {
+        let profile = GatewayAccessProfile {
+            id: "antigravity-jdd".into(),
+            name: "JDD Antigravity".into(),
+            target: GatewayTarget::Antigravity,
+            api_key: "sk-ant-jdd-12345678".into(),
+            enabled: true,
+            member_code: Some("jdd".into()),
+            role_title: None,
+            persona_summary: None,
+            color: None,
+            notes: None,
+        };
+
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("\"target\":\"antigravity\""));
+
+        let round_trip: GatewayAccessProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.target, GatewayTarget::Antigravity);
+        assert_eq!(round_trip.member_code.as_deref(), Some("jdd"));
+    }
+
+    #[test]
+    fn gateway_access_lists_antigravity_profiles_by_target() {
+        let profiles = GatewayAccessProfiles {
+            profiles: vec![
+                GatewayAccessProfile {
+                    id: "codex-default".into(),
+                    name: "Codex Default".into(),
+                    target: GatewayTarget::Codex,
+                    api_key: "sk-codex".into(),
+                    enabled: true,
+                    member_code: None,
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
+                GatewayAccessProfile {
+                    id: "ag-jdd".into(),
+                    name: "JDD Antigravity".into(),
+                    target: GatewayTarget::Antigravity,
+                    api_key: "sk-ant-jdd-12345678".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
+            ],
+        };
+
+        let antigravity_profiles = profiles.list_by_target(GatewayTarget::Antigravity);
+
+        assert_eq!(antigravity_profiles.len(), 1);
+        assert_eq!(antigravity_profiles[0].id, "ag-jdd");
+        assert_eq!(antigravity_profiles[0].member_code.as_deref(), Some("jdd"));
     }
 
     #[test]

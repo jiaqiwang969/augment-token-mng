@@ -3,33 +3,73 @@ use crate::http_client::create_proxy_client;
 
 const CLIENT_ID_ENV: &str = "ATM_ANTIGRAVITY_OAUTH_CLIENT_ID";
 const CLIENT_SECRET_ENV: &str = "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
+const LEGACY_CLIENT_ID_ENV: &str = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID";
+const LEGACY_CLIENT_SECRET_ENV: &str = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 
-fn required_env(name: &str) -> Result<String, String> {
-    let value = std::env::var(name).map_err(|_| {
-        format!(
-            "Missing required Antigravity OAuth environment variable: {}",
-            name
-        )
-    })?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(format!(
-            "Antigravity OAuth environment variable is empty: {}",
-            name
-        ));
+enum EnvValue {
+    Missing,
+    Empty,
+    Present(String),
+}
+
+fn read_env_value(name: &str) -> EnvValue {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                EnvValue::Empty
+            } else {
+                EnvValue::Present(trimmed.to_string())
+            }
+        }
+        Err(_) => EnvValue::Missing,
     }
-    Ok(trimmed.to_string())
+}
+
+fn missing_env_error(primary: &str, legacy: &str) -> String {
+    format!(
+        "Missing required Antigravity OAuth environment variable: {} (legacy fallback: {}). Add it to .env.antigravity or export it before running make dev.",
+        primary, legacy
+    )
+}
+
+fn empty_env_error(primary: &str) -> String {
+    format!(
+        "Antigravity OAuth environment variable is empty: {}. Set it in .env.antigravity or export it before running make dev.",
+        primary
+    )
+}
+
+fn empty_legacy_env_error(primary: &str, legacy: &str) -> String {
+    format!(
+        "Antigravity OAuth legacy environment variable is empty: {}. Prefer configuring {} in .env.antigravity.",
+        legacy, primary
+    )
+}
+
+fn required_env(primary: &str, legacy: &str) -> Result<String, String> {
+    match read_env_value(primary) {
+        EnvValue::Present(value) => return Ok(value),
+        EnvValue::Empty => return Err(empty_env_error(primary)),
+        EnvValue::Missing => {}
+    }
+
+    match read_env_value(legacy) {
+        EnvValue::Present(value) => Ok(value),
+        EnvValue::Empty => Err(empty_legacy_env_error(primary, legacy)),
+        EnvValue::Missing => Err(missing_env_error(primary, legacy)),
+    }
 }
 
 fn oauth_client_id() -> Result<String, String> {
-    required_env(CLIENT_ID_ENV)
+    required_env(CLIENT_ID_ENV, LEGACY_CLIENT_ID_ENV)
 }
 
 fn oauth_client_secret() -> Result<String, String> {
-    required_env(CLIENT_SECRET_ENV)
+    required_env(CLIENT_SECRET_ENV, LEGACY_CLIENT_SECRET_ENV)
 }
 
 /// 生成 OAuth 授权 URL
@@ -179,4 +219,88 @@ pub async fn ensure_fresh_token(
         current_token.project_id.clone(),
         None,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn clear_env(names: &[&str]) {
+        for name in names {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    #[test]
+    fn primary_env_takes_precedence_over_legacy() {
+        let _guard = env_lock();
+        clear_env(&[
+            CLIENT_ID_ENV,
+            LEGACY_CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            LEGACY_CLIENT_SECRET_ENV,
+        ]);
+
+        unsafe {
+            std::env::set_var(CLIENT_ID_ENV, "atm-client-id");
+            std::env::set_var(LEGACY_CLIENT_ID_ENV, "legacy-client-id");
+        }
+
+        assert_eq!(oauth_client_id().unwrap(), "atm-client-id");
+
+        clear_env(&[
+            CLIENT_ID_ENV,
+            LEGACY_CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            LEGACY_CLIENT_SECRET_ENV,
+        ]);
+    }
+
+    #[test]
+    fn legacy_env_is_used_when_primary_is_missing() {
+        let _guard = env_lock();
+        clear_env(&[
+            CLIENT_ID_ENV,
+            LEGACY_CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            LEGACY_CLIENT_SECRET_ENV,
+        ]);
+
+        unsafe {
+            std::env::set_var(LEGACY_CLIENT_SECRET_ENV, "legacy-client-secret");
+        }
+
+        assert_eq!(oauth_client_secret().unwrap(), "legacy-client-secret");
+
+        clear_env(&[
+            CLIENT_ID_ENV,
+            LEGACY_CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            LEGACY_CLIENT_SECRET_ENV,
+        ]);
+    }
+
+    #[test]
+    fn missing_env_error_mentions_primary_and_legacy_names() {
+        let _guard = env_lock();
+        clear_env(&[
+            CLIENT_ID_ENV,
+            LEGACY_CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            LEGACY_CLIENT_SECRET_ENV,
+        ]);
+
+        let error = oauth_client_id().unwrap_err();
+        assert!(error.contains(CLIENT_ID_ENV));
+        assert!(error.contains(LEGACY_CLIENT_ID_ENV));
+        assert!(error.contains(".env.antigravity"));
+    }
 }

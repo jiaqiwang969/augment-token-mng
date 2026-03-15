@@ -26,6 +26,17 @@
           @toggle-view="toggleViewMode"
           @clear-all="clearAllFilters"
         >
+          <button
+            class="btn btn--icon btn--ghost"
+            @click="showAntigravityServerDialog = true"
+            v-tooltip="$t('platform.antigravity.apiService.buttonTooltip')"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="6" rx="1.5"></rect>
+              <rect x="3" y="14" width="18" height="6" rx="1.5"></rect>
+              <path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"></path>
+            </svg>
+          </button>
           <button @click="showAddDialog = true" class="btn btn--icon btn--ghost" v-tooltip="$t('platform.antigravity.addAccount')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
               <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
@@ -445,6 +456,10 @@
 
     <!-- Add Account Dialog -->
     <AddAccountDialog v-if="showAddDialog" @close="showAddDialog = false" @add="handleAddAccount" @added="handleAccountAdded" />
+    <AntigravityServerDialog
+      v-if="showAntigravityServerDialog"
+      @close="showAntigravityServerDialog = false"
+    />
     <ModelsModal
       v-if="showModelsModal"
       :visible="showModelsModal"
@@ -504,6 +519,7 @@ import FixedPaginationLayout from '../common/FixedPaginationLayout.vue'
 import AccountManagerHeader from '../common/AccountManagerHeader.vue'
 import CustomPathDialog from '../common/CustomPathDialog.vue'
 import TagEditorModal from '../token/TagEditorModal.vue'
+import AntigravityServerDialog from '../antigravity/AntigravityServerDialog.vue'
 import { useStorageSync } from '@/composables/useStorageSync'
 
 const { t: $t } = useI18n()
@@ -520,6 +536,7 @@ const props = defineProps({
 const accounts = ref([])
 const currentAccountId = ref(null)
 const showAddDialog = ref(false)
+const showAntigravityServerDialog = ref(false)
 const isLoading = ref(false)
 const isRefreshing = ref(false)
 const switchingAccountId = ref(null)

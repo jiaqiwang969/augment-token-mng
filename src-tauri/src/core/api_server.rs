@@ -143,6 +143,7 @@ pub async fn start_api_server_cmd(
             codex_archive_storage: state.codex_archive_storage.clone(),
             proxy_config: state.proxy_config.clone(),
             augment_sidecar: state.augment_sidecar.clone(),
+            antigravity_sidecar: state.antigravity_sidecar.clone(),
         }),
         8766,
     )
@@ -180,6 +181,7 @@ pub async fn stop_api_server(
     if let Some(mut server) = server {
         server.shutdown();
         stop_managed_augment_sidecar(&state.augment_sidecar).await;
+        stop_managed_antigravity_sidecar(&state.antigravity_sidecar).await;
         // 同步清除 Codex 服务器状态
         *state.codex_server.lock().unwrap() = None;
         println!("🛑 API Server stopped");
@@ -210,9 +212,37 @@ pub(crate) async fn stop_managed_augment_sidecar(
     }
 }
 
+pub(crate) async fn stop_managed_antigravity_sidecar(
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>,
+    >,
+) {
+    let sidecar = {
+        let mut guard = managed_sidecar.lock().await;
+        guard.take()
+    };
+
+    if let Some(mut sidecar) = sidecar {
+        sidecar.stop().await;
+        let mut guard = managed_sidecar.lock().await;
+        *guard = Some(sidecar);
+    }
+}
+
 pub(crate) fn stop_managed_augment_sidecar_blocking(
     managed_sidecar: &tokio::sync::Mutex<
         Option<crate::platforms::augment::sidecar::AugmentSidecar>,
+    >,
+) {
+    let mut guard = managed_sidecar.blocking_lock();
+    if let Some(sidecar) = guard.as_mut() {
+        sidecar.force_stop();
+    }
+}
+
+pub(crate) fn stop_managed_antigravity_sidecar_blocking(
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>,
     >,
 ) {
     let mut guard = managed_sidecar.blocking_lock();
@@ -423,6 +453,18 @@ async fn handle_unified_gateway_request(
         }
         crate::core::gateway_access::GatewayTarget::Augment => {
             crate::platforms::augment::proxy_server::handle_unified_gateway_request(
+                raw_path,
+                method,
+                query,
+                headers,
+                body,
+                Some(profile),
+                state,
+            )
+            .await
+        }
+        crate::core::gateway_access::GatewayTarget::Antigravity => {
+            crate::platforms::antigravity::api_service::server::handle_unified_gateway_request(
                 raw_path,
                 method,
                 query,
@@ -1121,6 +1163,36 @@ pub(crate) async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejec
             })),
             status,
         ))
+    } else if let Some(rej) =
+        err.find::<crate::platforms::antigravity::api_service::server::AntigravityProxyRejection>()
+    {
+        let (status, message, code) = match rej {
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::NoAccounts(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "no_antigravity_accounts",
+            ),
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::SidecarNotReady(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "antigravity_sidecar_not_ready",
+            ),
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::UpstreamError(msg) => (
+                warp::http::StatusCode::BAD_GATEWAY,
+                msg.as_str(),
+                "antigravity_upstream_error",
+            ),
+        };
+        Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "error": {
+                    "message": message,
+                    "type": code,
+                    "code": status.as_u16().to_string()
+                }
+            })),
+            status,
+        ))
     } else if err.is_not_found() {
         let error_response = ApiErrorResponse {
             error: "Endpoint not found".to_string(),
@@ -1285,6 +1357,18 @@ mod tests {
                     color: None,
                     notes: None,
                 },
+                GatewayAccessProfile {
+                    id: "antigravity-jdd".into(),
+                    name: "JDD Antigravity".into(),
+                    target: GatewayTarget::Antigravity,
+                    api_key: "sk-ant-jdd".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
             ],
         }
     }
@@ -1311,6 +1395,9 @@ mod tests {
                                 "No available Augment accounts".to_string(),
                             ),
                         )),
+                        GatewayTarget::Antigravity => Result::<_, Rejection>::Ok(
+                            warp::reply::json(&json!({"backend": "antigravity"})),
+                        ),
                     }
                 },
             )
@@ -1349,6 +1436,23 @@ mod tests {
 
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"]["type"], "no_augment_accounts");
+    }
+
+    #[tokio::test]
+    async fn unified_gateway_routes_antigravity_key_to_antigravity_backend() {
+        let route = build_unified_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .header("authorization", "Bearer sk-ant-jdd")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["backend"], "antigravity");
     }
 
     #[tokio::test]

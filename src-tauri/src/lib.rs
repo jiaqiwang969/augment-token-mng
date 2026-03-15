@@ -42,6 +42,7 @@ pub use platforms::{antigravity, augment, claude, cursor, openai, windsurf};
 use crate::core::tray::TrayState;
 use crate::data::subscription::SubscriptionDualStorage;
 use crate::features::mail::{gptmail, hme, hme_storage::HmeStorage, outlook};
+use crate::platforms::antigravity::sidecar::AntigravitySidecar;
 use crate::platforms::augment::models::AugmentOAuthState;
 use crate::platforms::augment::sidecar::AugmentSidecar;
 use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
@@ -106,6 +107,7 @@ pub struct AppState {
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
     // Augment API 代理 sidecar
     pub augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
+    pub antigravity_sidecar: Arc<tokio::sync::Mutex<Option<AntigravitySidecar>>>,
 }
 
 fn resolve_augment_sidecar_binary(
@@ -136,6 +138,7 @@ fn resolve_augment_sidecar_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platforms::antigravity::sidecar::AntigravitySidecar;
     use crate::platforms::augment::sidecar::AugmentSidecar;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -226,6 +229,51 @@ mod tests {
             "sidecar manager should stay registered"
         );
     }
+
+    #[tokio::test]
+    async fn cleanup_managed_antigravity_sidecar_on_shutdown_preserves_manager_instance() {
+        let temp_dir = tempdir().unwrap();
+        let managed_sidecar = Arc::new(tokio::sync::Mutex::new(Some(AntigravitySidecar::new(
+            temp_dir.path(),
+            PathBuf::from("/tmp/cliproxy-server"),
+        ))));
+
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_antigravity_auths")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("cliproxy_antigravity_home")).unwrap();
+        std::fs::write(
+            temp_dir.path().join("cliproxy_antigravity_config.yaml"),
+            b"port: 12345",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("cliproxy_antigravity_runtime.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        cleanup_managed_antigravity_sidecar_on_shutdown(managed_sidecar.clone(), async {}).await;
+
+        assert!(!temp_dir.path().join("cliproxy_antigravity_auths").exists());
+        assert!(!temp_dir.path().join("cliproxy_antigravity_home").exists());
+        assert!(
+            !temp_dir
+                .path()
+                .join("cliproxy_antigravity_config.yaml")
+                .exists()
+        );
+        assert!(
+            !temp_dir
+                .path()
+                .join("cliproxy_antigravity_runtime.json")
+                .exists()
+        );
+
+        let guard = managed_sidecar.lock().await;
+        assert!(
+            guard.as_ref().is_some(),
+            "antigravity sidecar manager should stay registered"
+        );
+    }
 }
 
 pub fn run() {
@@ -302,6 +350,16 @@ pub fn run() {
                         &fallback_binary,
                     );
                     binary.map(|b| AugmentSidecar::new(&app_data_dir, b))
+                })),
+                antigravity_sidecar: Arc::new(tokio::sync::Mutex::new({
+                    let fallback_binary = std::path::PathBuf::from("/tmp/cliproxy-server");
+                    let resource_dir = app.handle().path().resource_dir().ok();
+                    let binary = resolve_augment_sidecar_binary(
+                        resource_dir.as_deref(),
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                        &fallback_binary,
+                    );
+                    binary.map(|b| AntigravitySidecar::new(&app_data_dir, b))
                 })),
             };
 
@@ -550,6 +608,7 @@ pub fn run() {
                         codex_archive_storage: state.codex_archive_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
                         augment_sidecar: state.augment_sidecar.clone(),
+                        antigravity_sidecar: state.antigravity_sidecar.clone(),
                     }),
                     8766,
                 ).await {
@@ -743,6 +802,25 @@ pub fn run() {
             antigravity::antigravity_validate_path,
             antigravity::antigravity_get_default_path,
             antigravity::antigravity_select_executable_path,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_api_service_status,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_access_config,
+            crate::platforms::antigravity::api_service::commands::list_antigravity_gateway_profiles,
+            crate::platforms::antigravity::api_service::commands::create_antigravity_gateway_profile,
+            crate::platforms::antigravity::api_service::commands::update_antigravity_gateway_profile,
+            crate::platforms::antigravity::api_service::commands::import_antigravity_team_template,
+            crate::platforms::antigravity::api_service::commands::regenerate_antigravity_gateway_profile_api_key,
+            crate::platforms::antigravity::api_service::commands::delete_antigravity_gateway_profile,
+            crate::platforms::antigravity::api_service::commands::export_antigravity_access_bundle,
+            crate::platforms::antigravity::api_service::commands::query_antigravity_logs_from_storage,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_model_stats_from_storage,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_log_summary_from_storage,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_period_stats_from_storage,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_daily_stats_from_storage,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_daily_stats_by_gateway_profile_from_storage,
+            crate::platforms::antigravity::api_service::commands::clear_antigravity_logs_in_storage,
+            crate::platforms::antigravity::api_service::commands::delete_antigravity_logs_before,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_log_storage_status,
+            crate::platforms::antigravity::api_service::commands::get_antigravity_all_time_stats,
 
             // Windsurf 管理命令
             windsurf::windsurf_login,
@@ -962,10 +1040,14 @@ pub fn run() {
                 crate::core::api_server::stop_managed_augment_sidecar_blocking(
                     &state.augment_sidecar,
                 );
+                crate::core::api_server::stop_managed_antigravity_sidecar_blocking(
+                    &state.antigravity_sidecar,
+                );
             }
         });
 }
 
+#[cfg(test)]
 async fn cleanup_managed_sidecar_on_shutdown<F>(
     managed_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
     shutdown_signal: F,
@@ -974,6 +1056,26 @@ async fn cleanup_managed_sidecar_on_shutdown<F>(
 {
     shutdown_signal.await;
     crate::core::api_server::stop_managed_augment_sidecar(&managed_sidecar).await;
+}
+
+#[cfg(test)]
+async fn cleanup_managed_antigravity_sidecar_on_shutdown<F>(
+    managed_sidecar: Arc<tokio::sync::Mutex<Option<AntigravitySidecar>>>,
+    shutdown_signal: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    shutdown_signal.await;
+    let sidecar = {
+        let mut guard = managed_sidecar.lock().await;
+        guard.take()
+    };
+
+    if let Some(mut sidecar) = sidecar {
+        sidecar.stop().await;
+        let mut guard = managed_sidecar.lock().await;
+        *guard = Some(sidecar);
+    }
 }
 
 #[cfg(unix)]
@@ -1003,11 +1105,15 @@ async fn wait_for_termination_signal() {
 }
 
 fn install_termination_cleanup(app: &tauri::AppHandle) {
-    let managed_sidecar = app.state::<AppState>().augment_sidecar.clone();
+    let managed_augment_sidecar = app.state::<AppState>().augment_sidecar.clone();
+    let managed_antigravity_sidecar = app.state::<AppState>().antigravity_sidecar.clone();
     let app_handle = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        cleanup_managed_sidecar_on_shutdown(managed_sidecar, wait_for_termination_signal()).await;
+        wait_for_termination_signal().await;
+        crate::core::api_server::stop_managed_augment_sidecar(&managed_augment_sidecar).await;
+        crate::core::api_server::stop_managed_antigravity_sidecar(&managed_antigravity_sidecar)
+            .await;
         app_handle.exit(0);
     });
 }
