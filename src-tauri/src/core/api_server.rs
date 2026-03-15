@@ -431,6 +431,11 @@ async fn handle_unified_gateway_request(
             )
             .await
         }
+        crate::core::gateway_access::GatewayTarget::Antigravity => Err(warp::reject::custom(
+            crate::platforms::openai::codex::server::CodexRejection::ExecutionError(
+                "Antigravity gateway target is not implemented yet".to_string(),
+            ),
+        )),
     }
 }
 
@@ -1283,6 +1288,18 @@ mod tests {
                     color: None,
                     notes: None,
                 },
+                GatewayAccessProfile {
+                    id: "antigravity-jdd".into(),
+                    name: "JDD Antigravity".into(),
+                    target: GatewayTarget::Antigravity,
+                    api_key: "sk-ant-jdd".into(),
+                    enabled: true,
+                    member_code: Some("jdd".into()),
+                    role_title: None,
+                    persona_summary: None,
+                    color: None,
+                    notes: None,
+                },
             ],
         }
     }
@@ -1309,6 +1326,9 @@ mod tests {
                                 "No available Augment accounts".to_string(),
                             ),
                         )),
+                        GatewayTarget::Antigravity => Result::<_, Rejection>::Ok(
+                            warp::reply::json(&json!({"backend": "antigravity"})),
+                        ),
                     }
                 },
             )
@@ -1347,6 +1367,23 @@ mod tests {
 
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"]["type"], "no_augment_accounts");
+    }
+
+    #[tokio::test]
+    async fn unified_gateway_routes_antigravity_key_to_antigravity_backend() {
+        let route = build_unified_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1/models")
+            .header("authorization", "Bearer sk-ant-jdd")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["backend"], "antigravity");
     }
 
     #[tokio::test]
