@@ -1,8 +1,28 @@
 const normalizeMemberCode = (value) => String(value || '').trim().toLowerCase()
 const normalizeProfileId = (value) => String(value || '').trim()
 
+const normalizeGatewayBaseUrl = (value) => String(value || '').trim().replace(/\/+$/, '')
+
+export const buildAntigravityGeminiBaseUrl = (baseUrl) => {
+  const normalizedBaseUrl = normalizeGatewayBaseUrl(baseUrl)
+  if (!normalizedBaseUrl) {
+    return ''
+  }
+
+  if (normalizedBaseUrl.endsWith('/v1beta')) {
+    return normalizedBaseUrl
+  }
+
+  if (normalizedBaseUrl.endsWith('/v1')) {
+    return `${normalizedBaseUrl.slice(0, -3)}/v1beta`
+  }
+
+  return `${normalizedBaseUrl}/v1beta`
+}
+
 export const buildAntigravityAccessBundle = ({ baseUrl, profiles }) => {
-  const publicBaseUrl = String(baseUrl || '').trim()
+  const publicBaseUrl = normalizeGatewayBaseUrl(baseUrl)
+  const geminiBaseUrl = buildAntigravityGeminiBaseUrl(publicBaseUrl)
   const items = Array.isArray(profiles) ? profiles : []
 
   return items
@@ -14,7 +34,12 @@ export const buildAntigravityAccessBundle = ({ baseUrl, profiles }) => {
 
       return [
         `# ${labelParts.join(' · ') || profile?.id || 'Member'}`,
+        '# Claude / OpenAI-compatible',
         `ANTIGRAVITY_BASE_URL=${publicBaseUrl}`,
+        `ANTIGRAVITY_API_KEY=${String(profile.apiKey || '').trim()}`,
+        '',
+        '# Gemini Native',
+        `ANTIGRAVITY_GEMINI_BASE_URL=${geminiBaseUrl}`,
         `ANTIGRAVITY_API_KEY=${String(profile.apiKey || '').trim()}`
       ].join('\n')
     })

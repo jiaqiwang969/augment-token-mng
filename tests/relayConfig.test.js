@@ -97,6 +97,15 @@ proxy_pass http://127.0.0.1:__ATM_RELAY_REMOTE_PORT__;
   assert.doesNotMatch(output, /__ATM_RELAY_/)
 })
 
+test('relay nginx template includes v1beta Gemini native routes', async () => {
+  const templatePath = path.resolve('deploy/nginx/public-atm-relay.conf.template')
+  const source = await readFile(templatePath, 'utf8')
+
+  assert.match(source, /location = \/v1beta\/models/)
+  assert.match(source, /location \^~ \/v1beta\/models\//)
+  assert.match(source, /proxy_pass http:\/\/127\.0\.0\.1:__ATM_RELAY_REMOTE_PORT__/)
+})
+
 test('upsertManagedRelayBlock replaces the legacy relay section', async () => {
   const { upsertManagedRelayBlock } = await loadModule()
 
@@ -159,6 +168,11 @@ test('check_remote_relay.sh fails fast on non-2xx responses and validates model 
   assert.match(source, /Expected 2xx/)
   assert.match(source, /JSON\.parse/)
   assert.match(source, /data.*Array\.isArray/s)
+  assert.match(source, /v1beta/)
+  assert.match(source, /PUBLIC_GEMINI_BASE_URL/)
+  assert.match(source, /PROBE_LABEL/)
+  assert.match(source, /Expected 2xx from \$\{PROBE_LABEL\}/)
+  assert.match(source, /python3 -/)
 })
 
 test('load_relay_env.sh preserves explicit environment overrides over file defaults', async () => {

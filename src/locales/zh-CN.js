@@ -1334,6 +1334,8 @@ export default {
         refresh: '刷新',
         localServerUrl: '本地服务 URL',
         publicServerUrl: '公网服务 URL',
+        protocolOpenaiCompatible: 'Claude / OpenAI 兼容',
+        protocolGeminiNative: 'Gemini Native',
         totalAccounts: '总账号',
         availableAccounts: '可用账号',
         enabledMembers: '已启用 Key',

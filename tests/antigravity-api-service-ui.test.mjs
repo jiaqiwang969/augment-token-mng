@@ -100,6 +100,7 @@ const accessBundle = buildAntigravityAccessBundle({
 
 assert.match(accessBundle, /# 佳琪 · jqw/)
 assert.match(accessBundle, /ANTIGRAVITY_BASE_URL=https:\/\/lingkong\.xyz\/v1/)
+assert.match(accessBundle, /ANTIGRAVITY_GEMINI_BASE_URL=https:\/\/lingkong\.xyz\/v1beta/)
 assert.match(accessBundle, /ANTIGRAVITY_API_KEY=sk-ant-jqw-01ad3e0b/)
 assert.doesNotMatch(accessBundle, /OPENAI_BASE_URL|OPENAI_API_KEY/)
 

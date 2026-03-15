@@ -16,10 +16,22 @@
 
 ## Commit Hygiene
 - Never commit real Antigravity OAuth client IDs, client secrets, or a populated `.env.antigravity` file.
+- Never commit a populated `.env.relay` file or real relay API keys.
 - Never print real Antigravity OAuth client IDs or client secrets to terminal output, logs, screenshots, or copied documentation.
 - Keep `.env.antigravity` ignored by git and update `.env.antigravity.example` whenever the required env names or setup flow changes.
+- Keep `.env.relay` ignored by git. Treat it as the source of truth for `make deploy`, and make sure it contains a currently valid gateway key before claiming relay deploy is broken.
 - Before commit or push, check staged diffs for `ATM_ANTIGRAVITY_OAUTH_` and `CLIPROXY_ANTIGRAVITY_OAUTH_` values to make sure only placeholders or compatibility references are present.
+
+## Relay Deployment
+- `make deploy` now validates both protocol families end to end:
+  - OpenAI-compatible relay on `/v1/*`
+  - Gemini native relay on `/v1beta/*`
+- The public relay host may already have a generic `/v1beta/` gateway block; avoid adding a second broad `/v1beta/` nginx location in the managed ATM relay block. Only proxy the narrower Gemini-native ATM paths:
+  - `= /v1beta/models`
+  - `^~ /v1beta/models/`
+- The local relay health script may use Node, but remote loopback checks must not assume Node is installed on the Ubuntu relay host. Prefer `python3` for remote JSON validation.
 
 ## Regression Checks
 - If you change Antigravity env loading, update `tests/antigravityEnv.test.js` in the same change.
+- If you change relay deployment behavior, update `tests/relayConfig.test.js` in the same change.
 - If you change the local startup workflow, keep the `make dev` and `make tauri-dev-full` targets aligned with `scripts/load_antigravity_env.sh`.

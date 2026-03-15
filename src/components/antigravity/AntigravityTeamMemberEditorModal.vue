@@ -127,8 +127,13 @@
           {{ $t('platform.antigravity.apiService.accessPreviewTitle') }}
         </div>
         <div class="mt-2 space-y-1 font-mono text-[11px] text-text-muted">
-          <div>ANTIGRAVITY_BASE_URL={{ publicBaseUrl }}</div>
-          <div v-if="localBaseUrl"># ANTIGRAVITY_BASE_URL={{ localBaseUrl }}</div>
+          <div># Claude / OpenAI-compatible</div>
+          <div>ANTIGRAVITY_BASE_URL={{ normalizedPublicBaseUrl }}</div>
+          <div v-if="normalizedLocalBaseUrl"># ANTIGRAVITY_BASE_URL={{ normalizedLocalBaseUrl }}</div>
+          <div>ANTIGRAVITY_API_KEY={{ draft.apiKey || 'sk-ant-…' }}</div>
+          <div class="pt-2"># Gemini Native</div>
+          <div>ANTIGRAVITY_GEMINI_BASE_URL={{ geminiPublicBaseUrl }}</div>
+          <div v-if="geminiLocalBaseUrl"># ANTIGRAVITY_GEMINI_BASE_URL={{ geminiLocalBaseUrl }}</div>
           <div>ANTIGRAVITY_API_KEY={{ draft.apiKey || 'sk-ant-…' }}</div>
         </div>
       </div>
@@ -188,6 +193,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '@/components/common/BaseModal.vue'
+import { buildAntigravityGeminiBaseUrl } from '@/utils/antigravityApiServiceUi'
 
 const props = defineProps({
   mode: {
@@ -249,6 +255,11 @@ const keySuffix = computed(() => {
   const segments = trimmed.split('-').filter(Boolean)
   return segments[segments.length - 1] || trimmed.slice(-8)
 })
+
+const normalizedPublicBaseUrl = computed(() => String(props.publicBaseUrl || '').trim().replace(/\/+$/, ''))
+const normalizedLocalBaseUrl = computed(() => String(props.localBaseUrl || '').trim().replace(/\/+$/, ''))
+const geminiPublicBaseUrl = computed(() => buildAntigravityGeminiBaseUrl(normalizedPublicBaseUrl.value))
+const geminiLocalBaseUrl = computed(() => buildAntigravityGeminiBaseUrl(normalizedLocalBaseUrl.value))
 
 const normalizeOptionalField = (value) => {
   const trimmed = String(value || '').trim()

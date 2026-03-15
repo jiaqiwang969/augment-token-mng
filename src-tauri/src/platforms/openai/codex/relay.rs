@@ -86,8 +86,7 @@ pub(crate) fn build_repair_sequence(
 ) -> Vec<CodexRelayRepairAction> {
     let mut sequence = Vec::new();
     let local_needs_repair = snapshot.local.last_checked_at.is_some() && !snapshot.local.healthy;
-    let public_needs_repair =
-        snapshot.public.last_checked_at.is_some() && !snapshot.public.healthy;
+    let public_needs_repair = snapshot.public.last_checked_at.is_some() && !snapshot.public.healthy;
 
     if local_needs_repair {
         sequence.push(CodexRelayRepairAction::RepairLocal);
@@ -279,7 +278,8 @@ fn default_control_socket(remote_port: u16) -> PathBuf {
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("~"));
-    home.join(".ssh").join(format!("atm-relay-{}.sock", remote_port))
+    home.join(".ssh")
+        .join(format!("atm-relay-{}.sock", remote_port))
 }
 
 fn resolve_relay_config(relay: &CodexRelayConfig) -> ResolvedRelayConfig {
@@ -408,8 +408,9 @@ async fn repair_public_relay(config: &ResolvedRelayConfig) -> Result<String, Str
         .ok_or_else(|| "ATM relay host is not configured".to_string())?;
 
     if let Some(parent) = config.control_socket.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to prepare ssh control socket directory: {}", error))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("failed to prepare ssh control socket directory: {}", error)
+        })?;
     }
 
     if check_public_relay_control_socket(host, &config.control_socket).await? {

@@ -85,6 +85,16 @@ test('Antigravity access bundle UI uses dedicated ANTIGRAVITY env names', async 
   assert.match(dialogSource, /buildAntigravityAccessBundle/)
   assert.doesNotMatch(dialogSource, /buildAllMembersAccessBundle/)
   assert.match(editorSource, /ANTIGRAVITY_BASE_URL=/)
+  assert.match(editorSource, /ANTIGRAVITY_GEMINI_BASE_URL=/)
+  assert.match(editorSource, /buildAntigravityGeminiBaseUrl/)
   assert.match(editorSource, /ANTIGRAVITY_API_KEY=/)
   assert.doesNotMatch(editorSource, /OPENAI_BASE_URL=|OPENAI_API_KEY=/)
+})
+
+test('Antigravity server dialog overview exposes Gemini native gateway URLs', async () => {
+  const source = await readSource(dialogPath, 'AntigravityServerDialog.vue')
+
+  assert.match(source, /buildAntigravityGeminiBaseUrl/)
+  assert.match(source, /geminiLocalServerUrl/)
+  assert.match(source, /geminiPublicServerUrl/)
 })

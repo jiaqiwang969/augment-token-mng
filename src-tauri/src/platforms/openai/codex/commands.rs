@@ -659,12 +659,8 @@ async fn apply_periodic_tasks(app: tauri::AppHandle, state: &AppState, config: &
     }
 
     if config.enabled {
-        start_periodic_relay_health_refresh(
-            app,
-            state,
-            config.relay.health_check_interval_seconds,
-        )
-        .await;
+        start_periodic_relay_health_refresh(app, state, config.relay.health_check_interval_seconds)
+            .await;
     } else {
         stop_periodic_relay_health_refresh(state).await;
     }
@@ -727,12 +723,11 @@ pub(crate) async fn ensure_local_codex_relay_core_running(
     normalize_runtime_fields(&mut config);
 
     if state.api_server.lock().unwrap().is_none() {
-        let server =
-            crate::core::api_server::start_api_server(
-                crate::core::api_server::clone_runtime_app_state(state),
-                SHARED_API_SERVER_PORT,
-            )
-            .await?;
+        let server = crate::core::api_server::start_api_server(
+            crate::core::api_server::clone_runtime_app_state(state),
+            SHARED_API_SERVER_PORT,
+        )
+        .await?;
         *state.api_server.lock().unwrap() = Some(server);
         let _ = app.emit("api-server-status-changed", true);
     }
@@ -1770,10 +1765,8 @@ async fn start_periodic_relay_health_refresh(
                 Ok(config) => {
                     config.enabled
                         && config.relay.auto_repair_enabled
-                        && !crate::platforms::openai::codex::relay::build_repair_sequence(
-                            &snapshot,
-                        )
-                        .is_empty()
+                        && !crate::platforms::openai::codex::relay::build_repair_sequence(&snapshot)
+                            .is_empty()
                 }
                 Err(_) => false,
             };

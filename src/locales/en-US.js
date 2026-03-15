@@ -1341,6 +1341,8 @@ export default {
         refresh: 'Refresh',
         localServerUrl: 'Local Server URL',
         publicServerUrl: 'Public Server URL',
+        protocolOpenaiCompatible: 'Claude / OpenAI-compatible',
+        protocolGeminiNative: 'Gemini Native',
         totalAccounts: 'Total Accounts',
         availableAccounts: 'Available Accounts',
         enabledMembers: 'Enabled Keys',

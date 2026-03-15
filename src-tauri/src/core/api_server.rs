@@ -147,11 +147,7 @@ pub async fn start_api_server_cmd(
         }
     }
 
-    let server = start_api_server(
-        clone_runtime_app_state(state.inner()),
-        8766,
-    )
-    .await?;
+    let server = start_api_server(clone_runtime_app_state(state.inner()), 8766).await?;
 
     *state.api_server.lock().unwrap() = Some(server);
 
@@ -420,6 +416,50 @@ fn unified_chat_completions_request_filter()
     unified_post_request_filter(warp::path!("v1" / "chat" / "completions"))
 }
 
+fn unified_v1beta_models_request_filter()
+-> impl Filter<Extract = (String, Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path("v1beta")
+        .and(warp::path("models"))
+        .and(warp::path::tail())
+        .and(warp::get())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .map(
+            |tail: warp::path::Tail, query: Option<String>, headers: HeaderMap| {
+                (
+                    build_v1beta_models_path(tail.as_str()),
+                    query,
+                    headers,
+                    Bytes::new(),
+                )
+            },
+        )
+        .untuple_one()
+}
+
+fn unified_v1beta_post_request_filter()
+-> impl Filter<Extract = (String, Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path("v1beta")
+        .and(warp::path("models"))
+        .and(warp::path::tail())
+        .and(warp::post())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .and(warp::body::content_length_limit(20 * 1024 * 1024))
+        .and(warp::body::bytes())
+        .map(
+            |tail: warp::path::Tail, query: Option<String>, headers: HeaderMap, body: Bytes| {
+                (
+                    build_v1beta_models_path(tail.as_str()),
+                    query,
+                    headers,
+                    body,
+                )
+            },
+        )
+        .untuple_one()
+}
+
 fn unified_post_request_filter<F>(
     path_filter: F,
 ) -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone
@@ -432,6 +472,15 @@ where
         .and(warp::header::headers_cloned())
         .and(warp::body::content_length_limit(20 * 1024 * 1024))
         .and(warp::body::bytes())
+}
+
+fn build_v1beta_models_path(tail: &str) -> String {
+    let trimmed = tail.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "/v1beta/models".to_string()
+    } else {
+        format!("/v1beta/models/{}", trimmed)
+    }
 }
 
 async fn handle_unified_gateway_request(
@@ -484,6 +533,37 @@ async fn handle_unified_gateway_request(
     }
 }
 
+async fn handle_unified_v1beta_gateway_request(
+    raw_path: String,
+    method: Method,
+    query: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+    state: Arc<AppState>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    let profile = resolve_gateway_profile(&state, &headers)?;
+
+    if profile.target != crate::core::gateway_access::GatewayTarget::Antigravity {
+        return Err(warp::reject::custom(
+            crate::platforms::openai::codex::server::CodexRejection::ExecutionError(
+                "Unauthorized: gateway API key does not support /v1beta Gemini native endpoints"
+                    .to_string(),
+            ),
+        ));
+    }
+
+    crate::platforms::antigravity::api_service::server::handle_unified_gemini_native_request(
+        raw_path,
+        method,
+        query,
+        headers,
+        body,
+        Some(profile),
+        state,
+    )
+    .await
+}
+
 fn unified_gateway_routes_from_state(
     state: Arc<AppState>,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
@@ -516,7 +596,7 @@ fn unified_gateway_routes_from_state(
         });
 
     let chat_completions_route = unified_chat_completions_request_filter()
-        .and(state_filter)
+        .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
             handle_unified_gateway_request(
                 "/v1/chat/completions".to_string(),
@@ -528,7 +608,37 @@ fn unified_gateway_routes_from_state(
             )
         });
 
-    models_route.or(responses_route).or(chat_completions_route)
+    let v1beta_models_route = unified_v1beta_models_request_filter()
+        .and(state_filter.clone())
+        .and_then(|raw_path, query, headers, body, state| {
+            handle_unified_v1beta_gateway_request(
+                raw_path,
+                Method::GET,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    let v1beta_post_route = unified_v1beta_post_request_filter()
+        .and(state_filter)
+        .and_then(|raw_path, query, headers, body, state| {
+            handle_unified_v1beta_gateway_request(
+                raw_path,
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    models_route
+        .or(responses_route)
+        .or(chat_completions_route)
+        .or(v1beta_models_route)
+        .or(v1beta_post_route)
 }
 
 // ==================== 路由处理器 ====================
@@ -1410,6 +1520,33 @@ mod tests {
             .recover(handle_rejection)
     }
 
+    fn build_unified_v1beta_gateway_test_route(
+        profiles: GatewayAccessProfiles,
+    ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+        let profiles_filter = warp::any().map(move || profiles.clone());
+
+        warp::path!("v1beta" / "models")
+            .and(warp::get())
+            .and(warp::header::headers_cloned())
+            .and(profiles_filter)
+            .and_then(
+                |headers: HeaderMap, profiles: GatewayAccessProfiles| async move {
+                    let profile = resolve_gateway_profile_from_profiles(&profiles, &headers)?;
+                    match profile.target {
+                        GatewayTarget::Antigravity => Result::<_, Rejection>::Ok(
+                            warp::reply::json(&json!({"backend": "antigravity-gemini"})),
+                        ),
+                        GatewayTarget::Codex | GatewayTarget::Augment => Err(warp::reject::custom(
+                            crate::platforms::openai::codex::server::CodexRejection::ExecutionError(
+                                "Unauthorized: gateway API key does not support /v1beta Gemini native endpoints".to_string(),
+                            ),
+                        )),
+                    }
+                },
+            )
+            .recover(handle_rejection)
+    }
+
     #[tokio::test]
     async fn unified_gateway_routes_codex_key_to_codex_backend() {
         let route = build_unified_gateway_test_route(gateway_test_profiles());
@@ -1479,6 +1616,65 @@ mod tests {
         assert_eq!(
             body["error"]["message"],
             "Unauthorized: invalid gateway API key"
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_v1beta_gateway_routes_antigravity_key_to_gemini_backend() {
+        let route = build_unified_v1beta_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1beta/models")
+            .header("authorization", "Bearer sk-ant-jdd")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["backend"], "antigravity-gemini");
+    }
+
+    #[tokio::test]
+    async fn unified_v1beta_gateway_rejects_codex_key() {
+        let route = build_unified_v1beta_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1beta/models")
+            .header("authorization", "Bearer sk-codex")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "unauthorized");
+        assert_eq!(
+            body["error"]["message"],
+            "Unauthorized: gateway API key does not support /v1beta Gemini native endpoints"
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_v1beta_gateway_rejects_augment_key() {
+        let route = build_unified_v1beta_gateway_test_route(gateway_test_profiles());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1beta/models")
+            .header("x-api-key", "sk-augment")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"]["type"], "unauthorized");
+        assert_eq!(
+            body["error"]["message"],
+            "Unauthorized: gateway API key does not support /v1beta Gemini native endpoints"
         );
     }
 }

@@ -37,35 +37,77 @@
         <div class="grid gap-3 lg:grid-cols-2">
           <div class="space-y-2 rounded-xl border border-border bg-bg-base/50 p-3">
             <label class="label mb-0">{{ $t('platform.antigravity.apiService.localServerUrl') }}</label>
-            <div class="flex gap-2">
-              <input class="input font-mono" :value="accessConfig.serverUrl" readonly />
-              <button
-                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                v-tooltip="$t('common.copy')"
-                @click="copyText(accessConfig.serverUrl)"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                </svg>
-              </button>
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <div class="text-[11px] text-text-muted">{{ $t('platform.antigravity.apiService.protocolOpenaiCompatible') }}</div>
+                <div class="flex gap-2">
+                  <input class="input font-mono" :value="accessConfig.serverUrl" readonly />
+                  <button
+                    class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                    v-tooltip="$t('common.copy')"
+                    @click="copyText(accessConfig.serverUrl)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="space-y-1">
+                <div class="text-[11px] text-text-muted">{{ $t('platform.antigravity.apiService.protocolGeminiNative') }}</div>
+                <div class="flex gap-2">
+                  <input class="input font-mono" :value="geminiLocalServerUrl" readonly />
+                  <button
+                    class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                    v-tooltip="$t('common.copy')"
+                    @click="copyText(geminiLocalServerUrl)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
           <div class="space-y-2 rounded-xl border border-border bg-bg-base/50 p-3">
             <label class="label mb-0">{{ $t('platform.antigravity.apiService.publicServerUrl') }}</label>
-            <div class="flex gap-2">
-              <input class="input font-mono" :value="accessConfig.publicServerUrl" readonly />
-              <button
-                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                v-tooltip="$t('common.copy')"
-                @click="copyText(accessConfig.publicServerUrl)"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2 2v1"></path>
-                </svg>
-              </button>
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <div class="text-[11px] text-text-muted">{{ $t('platform.antigravity.apiService.protocolOpenaiCompatible') }}</div>
+                <div class="flex gap-2">
+                  <input class="input font-mono" :value="accessConfig.publicServerUrl" readonly />
+                  <button
+                    class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                    v-tooltip="$t('common.copy')"
+                    @click="copyText(accessConfig.publicServerUrl)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="space-y-1">
+                <div class="text-[11px] text-text-muted">{{ $t('platform.antigravity.apiService.protocolGeminiNative') }}</div>
+                <div class="flex gap-2">
+                  <input class="input font-mono" :value="geminiPublicServerUrl" readonly />
+                  <button
+                    class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
+                    v-tooltip="$t('common.copy')"
+                    @click="copyText(geminiPublicServerUrl)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -698,6 +740,7 @@ import {
 import {
   buildAntigravityAccessBundle,
   buildAntigravityAnalyticsByProfileId,
+  buildAntigravityGeminiBaseUrl,
   buildAntigravityLogDisplayLabel,
   buildAntigravityLogMemberOptions,
   buildAntigravityMaintenanceSummary,
@@ -854,6 +897,9 @@ const teamSummaryCards = computed(() => ({
   todayTokens: memberTableRows.value.reduce((sum, profile) => sum + Number(profile.todayTokens || 0), 0),
   thirtyDayTokens: memberTableRows.value.reduce((sum, profile) => sum + Number(profile.totalTokens || 0), 0)
 }))
+
+const geminiLocalServerUrl = computed(() => buildAntigravityGeminiBaseUrl(accessConfig.value.serverUrl))
+const geminiPublicServerUrl = computed(() => buildAntigravityGeminiBaseUrl(accessConfig.value.publicServerUrl))
 
 const currentLogPage = computed(() =>
   logPage.value.total === 0 ? 1 : Math.floor(logOffset.value / logLimit.value) + 1

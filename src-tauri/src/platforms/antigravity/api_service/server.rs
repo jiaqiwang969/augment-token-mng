@@ -63,6 +63,52 @@ fn unified_chat_completions_request_filter()
 }
 
 #[cfg(test)]
+fn unified_v1beta_models_request_filter()
+-> impl Filter<Extract = (String, Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path("v1beta")
+        .and(warp::path("models"))
+        .and(warp::path::tail())
+        .and(warp::get())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .map(
+            |_tail: warp::path::Tail, query: Option<String>, headers: HeaderMap| {
+                (
+                    build_v1beta_models_path(_tail.as_str()),
+                    query,
+                    headers,
+                    Bytes::new(),
+                )
+            },
+        )
+        .untuple_one()
+}
+
+#[cfg(test)]
+fn unified_v1beta_post_request_filter()
+-> impl Filter<Extract = (String, Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    warp::path("v1beta")
+        .and(warp::path("models"))
+        .and(warp::path::tail())
+        .and(warp::post())
+        .and(optional_raw_query())
+        .and(warp::header::headers_cloned())
+        .and(warp::body::content_length_limit(20 * 1024 * 1024))
+        .and(warp::body::bytes())
+        .map(
+            |tail: warp::path::Tail, query: Option<String>, headers: HeaderMap, body: Bytes| {
+                (
+                    build_v1beta_models_path(tail.as_str()),
+                    query,
+                    headers,
+                    body,
+                )
+            },
+        )
+        .untuple_one()
+}
+
+#[cfg(test)]
 fn unified_post_request_filter<F>(
     path_filter: F,
 ) -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone
@@ -78,6 +124,27 @@ where
 }
 
 pub(crate) async fn handle_unified_gateway_request(
+    raw_path: String,
+    method: Method,
+    query: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+    gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
+    state: Arc<AppState>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    handle_antigravity_proxy(
+        raw_path,
+        method,
+        query,
+        headers,
+        body,
+        gateway_profile,
+        AntigravityProxyState::from_app_state(&state),
+    )
+    .await
+}
+
+pub(crate) async fn handle_unified_gemini_native_request(
     raw_path: String,
     method: Method,
     query: Option<String>,
@@ -133,7 +200,7 @@ fn unified_antigravity_routes(
         });
 
     let chat_completions_route = unified_chat_completions_request_filter()
-        .and(state_filter)
+        .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
             handle_antigravity_proxy(
                 "/v1/chat/completions".to_string(),
@@ -146,7 +213,23 @@ fn unified_antigravity_routes(
             )
         });
 
-    models_route.or(responses_route).or(chat_completions_route)
+    let v1beta_models_route = unified_v1beta_models_request_filter()
+        .and(state_filter.clone())
+        .and_then(|raw_path, query, headers, body, state| {
+            handle_antigravity_proxy(raw_path, Method::GET, query, headers, body, None, state)
+        });
+
+    let v1beta_post_route = unified_v1beta_post_request_filter()
+        .and(state_filter)
+        .and_then(|raw_path, query, headers, body, state| {
+            handle_antigravity_proxy(raw_path, Method::POST, query, headers, body, None, state)
+        });
+
+    models_route
+        .or(responses_route)
+        .or(chat_completions_route)
+        .or(v1beta_models_route)
+        .or(v1beta_post_route)
 }
 
 async fn handle_antigravity_proxy(
@@ -526,6 +609,7 @@ fn extract_model_from_json_bytes(body: &Bytes) -> Option<String> {
         .and_then(|value| {
             value
                 .get("model")
+                .or_else(|| value.get("modelVersion"))
                 .and_then(|model| model.as_str())
                 .map(str::to_string)
         })
@@ -546,7 +630,9 @@ fn extract_error_message(body: &Bytes) -> Option<String> {
 }
 
 fn infer_request_format(path: &str) -> &'static str {
-    if path.contains("/chat/completions") {
+    if path.contains("/v1beta/") {
+        "gemini-native"
+    } else if path.contains("/chat/completions") {
         "openai-chat-completions"
     } else if path.contains("/responses") {
         "openai-responses"
@@ -577,6 +663,16 @@ fn should_forward_request_header(name: &str) -> bool {
     !name.eq_ignore_ascii_case("host")
         && !name.eq_ignore_ascii_case("authorization")
         && !name.eq_ignore_ascii_case("content-length")
+}
+
+#[cfg(test)]
+fn build_v1beta_models_path(tail: &str) -> String {
+    let trimmed = tail.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "/v1beta/models".to_string()
+    } else {
+        format!("/v1beta/models/{}", trimmed)
+    }
 }
 
 fn build_streaming_response(
@@ -747,6 +843,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"data":[{"id":"antigravity-test"}]}')
             return
 
+        if self.path.startswith("/v1beta/models"):
+            payload = {"models": [{"name": "models/gemini-3.1-pro-preview"}]}
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
         self.send_response(404)
         self.end_headers()
 
@@ -774,6 +880,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'data: {"ok":true}\n\n')
             self.wfile.flush()
+            return
+
+        if self.path.startswith("/v1beta/models/"):
+            payload = {
+                "authorization": self.headers.get("Authorization"),
+                "path": self.path,
+                "body": body,
+                "modelVersion": "gemini-3.1-pro-preview",
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
             return
 
         self.send_response(404)
@@ -931,6 +1052,23 @@ PY
         assert_eq!(row["color"], "#4c6ef5");
     }
 
+    #[test]
+    fn antigravity_infer_request_format_marks_v1beta_as_gemini_native() {
+        assert_eq!(
+            infer_request_format("/v1beta/models/gemini-3.1-pro-preview:generateContent"),
+            "gemini-native"
+        );
+    }
+
+    #[test]
+    fn antigravity_extract_model_reads_gemini_model_version() {
+        let model = extract_model_from_json_bytes(&Bytes::from_static(
+            br#"{"modelVersion":"gemini-3.1-pro-preview"}"#,
+        ));
+
+        assert_eq!(model.as_deref(), Some("gemini-3.1-pro-preview"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn antigravity_unified_models_route_returns_sidecar_models() {
@@ -948,6 +1086,25 @@ PY
 
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["data"][0]["id"], "antigravity-test");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_unified_v1beta_models_route_returns_sidecar_models() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = unified_antigravity_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/v1beta/models")
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["models"][0]["name"], "models/gemini-3.1-pro-preview");
     }
 
     #[cfg(unix)]
@@ -1000,6 +1157,41 @@ PY
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         assert_eq!(response.body(), "data: {\"ok\":true}\n\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_unified_v1beta_generate_content_route_replaces_authorization() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = unified_antigravity_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/v1beta/models/gemini-3.1-pro-preview:generateContent")
+            .header("authorization", "Bearer user-token")
+            .header("content-type", "application/json")
+            .body(r#"{"contents":[{"role":"user","parts":[{"text":"Say ok"}]}]}"#)
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(
+            payload["path"],
+            "/v1beta/models/gemini-3.1-pro-preview:generateContent"
+        );
+
+        let authorization = payload["authorization"].as_str().unwrap();
+        assert!(authorization.starts_with("Bearer sk-atm-antigravity-internal-"));
+        assert_ne!(authorization, "Bearer user-token");
+        assert!(
+            payload["body"]
+                .as_str()
+                .unwrap()
+                .contains(r#""contents":[{"role":"user""#)
+        );
     }
 
     #[cfg(unix)]

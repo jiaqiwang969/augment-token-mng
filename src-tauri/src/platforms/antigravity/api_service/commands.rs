@@ -401,6 +401,7 @@ fn build_antigravity_access_bundle_text(
     profiles: &[AntigravityGatewayProfileEntry],
 ) -> String {
     let base_url = public_base_url.trim();
+    let gemini_base_url = build_antigravity_gemini_base_url(base_url);
 
     profiles
         .iter()
@@ -429,11 +430,26 @@ fn build_antigravity_access_bundle_text(
             };
 
             Some(format!(
-                "# {label}\nANTIGRAVITY_BASE_URL={base_url}\nANTIGRAVITY_API_KEY={api_key}"
+                "# {label}\n# Claude / OpenAI-compatible\nANTIGRAVITY_BASE_URL={base_url}\nANTIGRAVITY_API_KEY={api_key}\n\n# Gemini Native\nANTIGRAVITY_GEMINI_BASE_URL={gemini_base_url}\nANTIGRAVITY_API_KEY={api_key}"
             ))
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn build_antigravity_gemini_base_url(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/');
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    if normalized.ends_with("/v1beta") {
+        normalized.to_string()
+    } else if let Some(prefix) = normalized.strip_suffix("/v1") {
+        format!("{}/v1beta", prefix)
+    } else {
+        format!("{}/v1beta", normalized)
+    }
 }
 
 fn gateway_api_key_for_target(
@@ -475,7 +491,9 @@ fn is_antigravity_account_usable(account: &crate::platforms::antigravity::models
             .is_some_and(|quota| quota.is_forbidden)
 }
 
-fn antigravity_log_storage_for_data_dir(data_dir: PathBuf) -> Result<AntigravityLogStorage, String> {
+fn antigravity_log_storage_for_data_dir(
+    data_dir: PathBuf,
+) -> Result<AntigravityLogStorage, String> {
     AntigravityLogStorage::new(data_dir)
 }
 
@@ -1107,6 +1125,7 @@ mod tests {
         assert_eq!(updated.role_title.as_deref(), Some("实战落地"));
         assert_ne!(regenerated.api_key, previous_api_key);
         assert!(export.contains("ANTIGRAVITY_BASE_URL=https://lingkong.xyz/v1"));
+        assert!(export.contains("ANTIGRAVITY_GEMINI_BASE_URL=https://lingkong.xyz/v1beta"));
         assert!(export.contains("ANTIGRAVITY_API_KEY="));
         assert!(export.contains(&regenerated.api_key));
 
@@ -1131,8 +1150,7 @@ mod tests {
             },
         )
         .unwrap();
-        let daily =
-            get_antigravity_daily_stats_from_storage_with(None, Some(30)).unwrap();
+        let daily = get_antigravity_daily_stats_from_storage_with(None, Some(30)).unwrap();
         let by_profile =
             get_antigravity_daily_stats_by_gateway_profile_from_storage_with(None, Some(30))
                 .unwrap();
