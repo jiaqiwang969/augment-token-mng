@@ -1161,8 +1161,8 @@ pub(crate) async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejec
             })),
             status,
         ))
-    } else if let Some(rej) = err
-        .find::<crate::platforms::antigravity::api_service::server::AntigravityProxyRejection>()
+    } else if let Some(rej) =
+        err.find::<crate::platforms::antigravity::api_service::server::AntigravityProxyRejection>()
     {
         let (status, message, code) = match rej {
             crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::NoAccounts(msg) => (

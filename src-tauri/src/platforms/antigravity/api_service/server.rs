@@ -2,16 +2,22 @@ use crate::AppState;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use hyper::{Body, Response};
+use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
-use warp::http::{HeaderMap, Method, StatusCode};
+use tauri::Manager;
 #[cfg(test)]
 use warp::Filter;
+use warp::http::{HeaderMap, Method, StatusCode};
 use warp::{Rejection, Reply};
 
 #[derive(Clone)]
 struct AntigravityProxyState {
-    antigravity_storage_manager: Arc<std::sync::Mutex<Option<Arc<crate::storage::AntigravityDualStorage>>>>,
-    antigravity_sidecar: Arc<tokio::sync::Mutex<Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>>>,
+    antigravity_storage_manager:
+        Arc<std::sync::Mutex<Option<Arc<crate::storage::AntigravityDualStorage>>>>,
+    antigravity_sidecar:
+        Arc<tokio::sync::Mutex<Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>>>,
+    log_storage_dir: Option<PathBuf>,
 }
 
 impl AntigravityProxyState {
@@ -19,6 +25,7 @@ impl AntigravityProxyState {
         Self {
             antigravity_storage_manager: state.antigravity_storage_manager.clone(),
             antigravity_sidecar: state.antigravity_sidecar.clone(),
+            log_storage_dir: state.app_handle.path().app_data_dir().ok(),
         }
     }
 }
@@ -76,7 +83,7 @@ pub(crate) async fn handle_unified_gateway_request(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
-    _gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
+    gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
     state: Arc<AppState>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     handle_antigravity_proxy(
@@ -85,6 +92,7 @@ pub(crate) async fn handle_unified_gateway_request(
         query,
         headers,
         body,
+        gateway_profile,
         AntigravityProxyState::from_app_state(&state),
     )
     .await
@@ -105,6 +113,7 @@ fn unified_antigravity_routes(
                 query,
                 headers,
                 body,
+                None,
                 state,
             )
         });
@@ -118,6 +127,7 @@ fn unified_antigravity_routes(
                 query,
                 headers,
                 body,
+                None,
                 state,
             )
         });
@@ -131,6 +141,7 @@ fn unified_antigravity_routes(
                 query,
                 headers,
                 body,
+                None,
                 state,
             )
         });
@@ -144,6 +155,7 @@ async fn handle_antigravity_proxy(
     query: Option<String>,
     headers: HeaderMap,
     body: Bytes,
+    gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
     state: AntigravityProxyState,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let accounts = get_available_accounts(&state)
@@ -151,9 +163,9 @@ async fn handle_antigravity_proxy(
         .map_err(|e| warp::reject::custom(AntigravityProxyRejection::NoAccounts(e)))?;
 
     if accounts.is_empty() {
-        return Err(warp::reject::custom(
-            AntigravityProxyRejection::NoAccounts("No available Antigravity accounts".into()),
-        ));
+        return Err(warp::reject::custom(AntigravityProxyRejection::NoAccounts(
+            "No available Antigravity accounts".into(),
+        )));
     }
 
     let (base_url, api_key) = {
@@ -172,6 +184,9 @@ async fn handle_antigravity_proxy(
 
     let upstream_url = build_upstream_url(&base_url, &raw_path, query.as_deref());
     let client = reqwest::Client::new();
+    let request_body = body.clone();
+    let request_format = infer_request_format(&raw_path);
+    let request_model = extract_model_from_json_bytes(&request_body).unwrap_or_default();
     let mut req_builder = client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST),
         &upstream_url,
@@ -205,9 +220,16 @@ async fn handle_antigravity_proxy(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     if is_stream {
-        let response =
-            build_streaming_response(upstream_status, &upstream_headers, upstream_response)
-                .map_err(|e| warp::reject::custom(AntigravityProxyRejection::UpstreamError(e)))?;
+        let response = build_streaming_response(
+            upstream_status,
+            &upstream_headers,
+            upstream_response,
+            request_format,
+            request_model,
+            gateway_profile.clone(),
+            state.log_storage_dir.clone(),
+        )
+        .map_err(|e| warp::reject::custom(AntigravityProxyRejection::UpstreamError(e)))?;
         return Ok(Box::new(response) as Box<dyn Reply>);
     }
 
@@ -227,11 +249,310 @@ async fn handle_antigravity_proxy(
         builder = builder.header(name, value);
     }
 
-    let response = builder
-        .body(Body::from(body_bytes))
-        .map_err(|e| warp::reject::custom(AntigravityProxyRejection::UpstreamError(e.to_string())))?;
+    let model = extract_model_from_json_bytes(&body_bytes).unwrap_or(request_model);
+    let usage = extract_usage_from_json_bytes(&body_bytes);
+    let error_message = if upstream_status.is_success() {
+        None
+    } else {
+        extract_error_message(&body_bytes)
+    };
+    let log = build_request_log(
+        model,
+        request_format,
+        if upstream_status.is_success() {
+            "success"
+        } else {
+            "error"
+        },
+        usage,
+        error_message,
+        gateway_profile.as_ref(),
+    );
+    persist_request_log(state.log_storage_dir.clone(), log).await;
+
+    let response = builder.body(Body::from(body_bytes)).map_err(|e| {
+        warp::reject::custom(AntigravityProxyRejection::UpstreamError(e.to_string()))
+    })?;
 
     Ok(Box::new(response) as Box<dyn Reply>)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UsageStats {
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+}
+
+#[derive(Default)]
+struct SseUsageExtractor {
+    pending: String,
+    usage: UsageStats,
+}
+
+impl SseUsageExtractor {
+    fn ingest_chunk(&mut self, chunk: &Bytes) {
+        let text = String::from_utf8_lossy(chunk);
+        self.pending.push_str(&text);
+
+        while let Some(idx) = self.pending.find("\n\n") {
+            let event = self.pending[..idx].to_string();
+            self.pending.drain(..idx + 2);
+            self.parse_event_block(&event);
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.pending.trim().is_empty() {
+            return;
+        }
+
+        let event = std::mem::take(&mut self.pending);
+        self.parse_event_block(&event);
+    }
+
+    fn parse_event_block(&mut self, block: &str) {
+        let mut data_lines = Vec::new();
+        for line in block.lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim_start());
+            }
+        }
+
+        if data_lines.is_empty() {
+            return;
+        }
+
+        let data = data_lines.join("\n");
+        if data.trim() == "[DONE]" {
+            return;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
+
+        self.extract_fields(&value);
+    }
+
+    fn extract_fields(&mut self, value: &Value) {
+        let is_completed = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("response.completed"));
+        if !is_completed {
+            return;
+        }
+
+        if let Some(usage) = value
+            .pointer("/response/usage")
+            .or_else(|| value.get("usage"))
+        {
+            self.usage = usage_stats_from_value(usage);
+        }
+    }
+}
+
+fn extract_usage_from_json_bytes(body: &Bytes) -> UsageStats {
+    let Ok(root) = serde_json::from_slice::<Value>(body) else {
+        return UsageStats::default();
+    };
+
+    let Some(usage) = root
+        .get("usage")
+        .or_else(|| root.get("response").and_then(|value| value.get("usage")))
+    else {
+        return UsageStats::default();
+    };
+
+    usage_stats_from_value(usage)
+}
+
+fn usage_stats_from_value(usage: &Value) -> UsageStats {
+    let input_tokens = to_i64(
+        usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens")),
+    );
+    let output_tokens = to_i64(
+        usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens")),
+    );
+    let total_tokens = {
+        let explicit_total = to_i64(usage.get("total_tokens"));
+        if explicit_total > 0 {
+            explicit_total
+        } else {
+            input_tokens + output_tokens
+        }
+    };
+
+    UsageStats {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    }
+}
+
+fn to_i64(value: Option<&Value>) -> i64 {
+    value
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        })
+        .unwrap_or(0)
+}
+
+#[derive(Default)]
+struct GatewayProfileLogMetadata {
+    gateway_profile_id: Option<String>,
+    gateway_profile_name: Option<String>,
+    member_code: Option<String>,
+    role_title: Option<String>,
+    display_label: Option<String>,
+    api_key_suffix: Option<String>,
+    color: Option<String>,
+}
+
+fn trimmed_profile_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn build_gateway_profile_display_label(
+    name: Option<&str>,
+    member_code: Option<&str>,
+    role_title: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(name) = trimmed_profile_value(name) {
+        parts.push(name);
+    }
+    if let Some(member_code) = trimmed_profile_value(member_code) {
+        parts.push(member_code);
+    }
+    if let Some(role_title) = trimmed_profile_value(role_title) {
+        parts.push(role_title);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn extract_gateway_api_key_suffix(api_key: &str) -> Option<String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit('-')
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn build_gateway_profile_log_metadata(
+    gateway_profile: Option<&crate::core::gateway_access::GatewayAccessProfile>,
+) -> GatewayProfileLogMetadata {
+    let Some(profile) = gateway_profile else {
+        return GatewayProfileLogMetadata::default();
+    };
+
+    let gateway_profile_name = trimmed_profile_value(Some(profile.name.as_str()));
+    let member_code = trimmed_profile_value(profile.member_code.as_deref());
+    let role_title = trimmed_profile_value(profile.role_title.as_deref());
+
+    GatewayProfileLogMetadata {
+        gateway_profile_id: trimmed_profile_value(Some(profile.id.as_str())),
+        gateway_profile_name: gateway_profile_name.clone(),
+        member_code: member_code.clone(),
+        role_title: role_title.clone(),
+        display_label: build_gateway_profile_display_label(
+            gateway_profile_name.as_deref(),
+            member_code.as_deref(),
+            role_title.as_deref(),
+        ),
+        api_key_suffix: extract_gateway_api_key_suffix(&profile.api_key),
+        color: trimmed_profile_value(profile.color.as_deref()),
+    }
+}
+
+fn build_request_log(
+    model: String,
+    format: &str,
+    status: &str,
+    usage: UsageStats,
+    error_message: Option<String>,
+    gateway_profile: Option<&crate::core::gateway_access::GatewayAccessProfile>,
+) -> crate::platforms::antigravity::api_service::models::RequestLog {
+    let metadata = build_gateway_profile_log_metadata(gateway_profile);
+
+    crate::platforms::antigravity::api_service::models::RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
+        account_id: "antigravity-sidecar".to_string(),
+        account_email: String::new(),
+        model,
+        format: format.to_string(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        status: status.to_string(),
+        error_message,
+        request_duration_ms: None,
+        gateway_profile_id: metadata.gateway_profile_id,
+        gateway_profile_name: metadata.gateway_profile_name,
+        member_code: metadata.member_code,
+        role_title: metadata.role_title,
+        display_label: metadata.display_label,
+        api_key_suffix: metadata.api_key_suffix,
+        color: metadata.color,
+    }
+}
+
+fn extract_model_from_json_bytes(body: &Bytes) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(|model| model.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn extract_error_message(body: &Bytes) -> Option<String> {
+    let Ok(root) = serde_json::from_slice::<Value>(body) else {
+        return None;
+    };
+
+    root.pointer("/error/message")
+        .or_else(|| root.get("message"))
+        .or_else(|| root.get("detail"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_request_format(path: &str) -> &'static str {
+    if path.contains("/chat/completions") {
+        "openai-chat-completions"
+    } else if path.contains("/responses") {
+        "openai-responses"
+    } else {
+        "openai-models"
+    }
 }
 
 #[derive(Debug)]
@@ -262,6 +583,10 @@ fn build_streaming_response(
     status: StatusCode,
     headers: &HeaderMap,
     response: reqwest::Response,
+    request_format: &'static str,
+    request_model: String,
+    gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
+    log_storage_dir: Option<PathBuf>,
 ) -> Result<Response<Body>, String> {
     let mut builder = Response::builder().status(status);
     for (name, value) in headers.iter() {
@@ -276,9 +601,11 @@ fn build_streaming_response(
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
+        let mut usage_extractor = SseUsageExtractor::default();
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    usage_extractor.ingest_chunk(&bytes);
                     if tx.send(Ok(bytes)).await.is_err() {
                         break;
                     }
@@ -294,13 +621,48 @@ fn build_streaming_response(
                 }
             }
         }
+
+        usage_extractor.finish();
+
+        let log = build_request_log(
+            request_model,
+            request_format,
+            if status.is_success() {
+                "success"
+            } else {
+                "error"
+            },
+            usage_extractor.usage,
+            None,
+            gateway_profile.as_ref(),
+        );
+        persist_request_log(log_storage_dir, log).await;
     });
 
     let body = Body::wrap_stream(rx);
     builder.body(body).map_err(|e| e.to_string())
 }
 
-async fn get_available_accounts(state: &AntigravityProxyState) -> Result<Vec<crate::platforms::antigravity::models::Account>, String> {
+async fn persist_request_log(
+    log_storage_dir: Option<PathBuf>,
+    log: crate::platforms::antigravity::api_service::models::RequestLog,
+) {
+    let Some(data_dir) = log_storage_dir else {
+        return;
+    };
+
+    let Ok(storage) =
+        crate::platforms::antigravity::api_service::logger::AntigravityLogStorage::new(data_dir)
+    else {
+        return;
+    };
+
+    storage.add_log(log).await;
+}
+
+async fn get_available_accounts(
+    state: &AntigravityProxyState,
+) -> Result<Vec<crate::platforms::antigravity::models::Account>, String> {
     use crate::data::storage::common::traits::AccountStorage;
 
     let storage = {
@@ -322,6 +684,7 @@ async fn get_available_accounts(state: &AntigravityProxyState) -> Result<Vec<cra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::gateway_access::{GatewayAccessProfile, GatewayTarget};
     use crate::data::storage::common::traits::AccountStorage;
     use crate::platforms::antigravity::models::{Account, QuotaData, TokenData};
     use serde_json::Value;
@@ -453,6 +816,7 @@ PY
                     write_fake_proxy_sidecar_binary(temp_dir),
                 ),
             ))),
+            log_storage_dir: Some(temp_dir.to_path_buf()),
         }
     }
 
@@ -494,6 +858,77 @@ PY
     #[test]
     fn account_with_valid_token_is_usable() {
         assert!(is_account_usable(&sample_account("jdd@lingkong.xyz")));
+    }
+
+    #[test]
+    fn antigravity_usage_defaults_to_zero_when_usage_missing() {
+        let usage = extract_usage_from_json_bytes(&Bytes::from_static(br#"{"id":"resp_1"}"#));
+
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn antigravity_streaming_usage_only_finalizes_from_completed_event() {
+        let mut extractor = SseUsageExtractor::default();
+
+        extractor.ingest_chunk(&Bytes::from_static(
+            br#"data: {"type":"response.output_text.delta","usage":{"input_tokens":99,"output_tokens":1,"total_tokens":100}}
+
+"#,
+        ));
+        extractor.ingest_chunk(&Bytes::from_static(
+            br#"data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":34,"total_tokens":46}}}
+
+"#,
+        ));
+        extractor.finish();
+
+        assert_eq!(
+            extractor.usage,
+            UsageStats {
+                input_tokens: 12,
+                output_tokens: 34,
+                total_tokens: 46,
+            }
+        );
+    }
+
+    #[test]
+    fn antigravity_request_log_captures_member_identity_fields() {
+        let profile = GatewayAccessProfile {
+            id: "ant-jdd".to_string(),
+            name: "姜大大".to_string(),
+            target: GatewayTarget::Antigravity,
+            api_key: "sk-ant-jdd-a4f29c7e".to_string(),
+            enabled: true,
+            member_code: Some("jdd".to_string()),
+            role_title: Some("产品与方法论".to_string()),
+            persona_summary: Some("高频输出".to_string()),
+            color: Some("#4c6ef5".to_string()),
+            notes: Some("高频使用成员".to_string()),
+        };
+
+        let log = build_request_log(
+            "claude-sonnet-4-5".to_string(),
+            "openai-responses",
+            "success",
+            UsageStats {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+            },
+            None,
+            Some(&profile),
+        );
+        let row = serde_json::to_value(&log).unwrap();
+
+        assert_eq!(row["member_code"], "jdd");
+        assert_eq!(row["role_title"], "产品与方法论");
+        assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
+        assert_eq!(row["api_key_suffix"], "a4f29c7e");
+        assert_eq!(row["color"], "#4c6ef5");
     }
 
     #[cfg(unix)]
@@ -587,9 +1022,10 @@ PY
                     write_fake_proxy_sidecar_binary(temp_dir.path()),
                 ),
             ))),
+            log_storage_dir: Some(temp_dir.path().to_path_buf()),
         };
-        let route =
-            unified_antigravity_routes(state.clone()).recover(crate::core::api_server::handle_rejection);
+        let route = unified_antigravity_routes(state.clone())
+            .recover(crate::core::api_server::handle_rejection);
 
         let response = warp::test::request()
             .method("GET")
@@ -601,7 +1037,10 @@ PY
 
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"]["type"], "no_antigravity_accounts");
-        assert_eq!(body["error"]["message"], "No available Antigravity accounts");
+        assert_eq!(
+            body["error"]["message"],
+            "No available Antigravity accounts"
+        );
     }
 }
 

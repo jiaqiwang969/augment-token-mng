@@ -182,9 +182,8 @@ impl AntigravitySidecar {
                 let target_path = self.auth_dir.join(filename);
 
                 if target_path.exists() {
-                    std::fs::remove_file(&target_path).map_err(|e| {
-                        format!("Failed to replace auth file {}: {}", filename, e)
-                    })?;
+                    std::fs::remove_file(&target_path)
+                        .map_err(|e| format!("Failed to replace auth file {}: {}", filename, e))?;
                 }
 
                 std::fs::rename(&staging_path, &target_path)
@@ -338,9 +337,10 @@ fn build_auth_file(account: &Account) -> Result<(String, String), String> {
     } else {
         chrono::Utc::now().timestamp()
     };
-    let expired = chrono::DateTime::<chrono::Utc>::from_timestamp(account.token.expiry_timestamp, 0)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339();
+    let expired =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(account.token.expiry_timestamp, 0)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339();
     let metadata = json!({
         "type": "antigravity",
         "label": if email.is_empty() { "antigravity" } else { email.as_str() },
@@ -379,19 +379,70 @@ fn yaml_double_quoted(value: &str) -> String {
     )
 }
 
-fn sidecar_process_env(home_dir: &Path) -> Vec<(&'static str, PathBuf)> {
-    let home_dir = home_dir.to_path_buf();
+fn sidecar_process_env(home_dir: &Path) -> Vec<(String, String)> {
+    let host_env: Vec<(String, String)> = std::env::vars().collect();
+    build_sidecar_process_env(home_dir, &host_env)
+}
+
+fn build_sidecar_process_env(
+    home_dir: &Path,
+    host_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let home_dir = home_dir.to_string_lossy().to_string();
     let mut env = vec![
-        ("HOME", home_dir.clone()),
-        ("USERPROFILE", home_dir.clone()),
+        ("HOME".to_string(), home_dir.clone()),
+        ("USERPROFILE".to_string(), home_dir.clone()),
     ];
 
-    if let Some((drive, path)) = split_windows_home_components(&home_dir) {
-        env.push(("HOMEDRIVE", PathBuf::from(drive)));
-        env.push(("HOMEPATH", PathBuf::from(path)));
+    if let Some((drive, path)) = split_windows_home_components(Path::new(&home_dir)) {
+        env.push(("HOMEDRIVE".to_string(), drive));
+        env.push(("HOMEPATH".to_string(), path));
     }
 
+    push_antigravity_oauth_env_alias(
+        &mut env,
+        host_env,
+        "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID",
+        "ATM_ANTIGRAVITY_OAUTH_CLIENT_ID",
+    );
+    push_antigravity_oauth_env_alias(
+        &mut env,
+        host_env,
+        "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET",
+        "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET",
+    );
+
     env
+}
+
+fn push_antigravity_oauth_env_alias(
+    env: &mut Vec<(String, String)>,
+    host_env: &[(String, String)],
+    cliproxy_name: &str,
+    atm_name: &str,
+) {
+    let cliproxy_value = lookup_env_value(host_env, cliproxy_name);
+    let atm_value = lookup_env_value(host_env, atm_name);
+    let selected = cliproxy_value.or(atm_value);
+
+    if let Some(value) = selected {
+        env.push((cliproxy_name.to_string(), value.to_string()));
+    }
+}
+
+fn lookup_env_value<'a>(host_env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    host_env.iter().find_map(|(candidate, value)| {
+        if candidate == key {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) async fn probe_sidecar_health(base_url: &str, api_key: &str) -> bool {
@@ -442,6 +493,7 @@ mod tests {
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
     fn sample_account(email: &str) -> Account {
@@ -457,9 +509,44 @@ mod tests {
                 Some("session-1".into()),
             ),
         );
-        account.updated_at = Utc.with_ymd_and_hms(2026, 3, 15, 8, 0, 0).unwrap().timestamp();
+        account.updated_at = Utc
+            .with_ymd_and_hms(2026, 3, 15, 8, 0, 0)
+            .unwrap()
+            .timestamp();
         account.quota = Some(QuotaData::new());
         account
+    }
+
+    fn antigravity_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.previous {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
     }
 
     #[test]
@@ -467,9 +554,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let sidecar = AntigravitySidecar::new(dir.path(), PathBuf::from("/tmp/cliproxy-server"));
 
-        assert!(sidecar.config_path().ends_with("cliproxy_antigravity_config.yaml"));
+        assert!(
+            sidecar
+                .config_path()
+                .ends_with("cliproxy_antigravity_config.yaml")
+        );
         assert!(sidecar.auth_dir().ends_with("cliproxy_antigravity_auths"));
-        assert!(sidecar.runtime_path().ends_with("cliproxy_antigravity_runtime.json"));
+        assert!(
+            sidecar
+                .runtime_path()
+                .ends_with("cliproxy_antigravity_runtime.json")
+        );
     }
 
     #[test]
@@ -513,5 +608,93 @@ mod tests {
         assert_eq!(json["session_id"], "session-1");
         assert_eq!(json["expires_in"], 3600);
         assert!(json["expired"].as_str().is_some());
+    }
+
+    #[test]
+    fn antigravity_sidecar_sync_accounts_does_not_persist_oauth_client_credentials() {
+        let _guard = antigravity_env_lock();
+        let _client_id = ScopedEnvVar::set("ATM_ANTIGRAVITY_OAUTH_CLIENT_ID", "atm-test-client-id");
+        let _client_secret = ScopedEnvVar::set(
+            "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET",
+            "atm-test-client-secret",
+        );
+
+        let dir = tempdir().unwrap();
+        let sidecar = AntigravitySidecar::new(dir.path(), PathBuf::from("/tmp/cliproxy-server"));
+
+        sidecar
+            .sync_accounts(&[sample_account("jdd@lingkong.xyz")])
+            .unwrap();
+
+        let auth_path = sidecar.auth_dir().join("antigravity-jdd@lingkong.xyz.json");
+        let raw = fs::read_to_string(auth_path).unwrap();
+        let json: Value = serde_json::from_str(&raw).unwrap();
+
+        assert!(json.get("client_id").is_none());
+        assert!(json.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn antigravity_sidecar_env_maps_atm_oauth_env_to_cliproxy_aliases() {
+        let dir = tempdir().unwrap();
+        let env = build_sidecar_process_env(
+            dir.path(),
+            &[
+                (
+                    "ATM_ANTIGRAVITY_OAUTH_CLIENT_ID".to_string(),
+                    "atm-client-id".to_string(),
+                ),
+                (
+                    "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET".to_string(),
+                    "atm-client-secret".to_string(),
+                ),
+            ],
+        );
+
+        let env_map: std::collections::HashMap<String, String> = env.into_iter().collect();
+        assert_eq!(
+            env_map.get("CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"),
+            Some(&"atm-client-id".to_string())
+        );
+        assert_eq!(
+            env_map.get("CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"),
+            Some(&"atm-client-secret".to_string())
+        );
+    }
+
+    #[test]
+    fn antigravity_sidecar_env_prefers_existing_cliproxy_oauth_env() {
+        let dir = tempdir().unwrap();
+        let env = build_sidecar_process_env(
+            dir.path(),
+            &[
+                (
+                    "ATM_ANTIGRAVITY_OAUTH_CLIENT_ID".to_string(),
+                    "atm-client-id".to_string(),
+                ),
+                (
+                    "ATM_ANTIGRAVITY_OAUTH_CLIENT_SECRET".to_string(),
+                    "atm-client-secret".to_string(),
+                ),
+                (
+                    "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID".to_string(),
+                    "cliproxy-client-id".to_string(),
+                ),
+                (
+                    "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET".to_string(),
+                    "cliproxy-client-secret".to_string(),
+                ),
+            ],
+        );
+
+        let env_map: std::collections::HashMap<String, String> = env.into_iter().collect();
+        assert_eq!(
+            env_map.get("CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"),
+            Some(&"cliproxy-client-id".to_string())
+        );
+        assert_eq!(
+            env_map.get("CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"),
+            Some(&"cliproxy-client-secret".to_string())
+        );
     }
 }

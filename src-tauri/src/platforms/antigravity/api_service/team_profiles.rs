@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 
 use crate::core::gateway_access::{GatewayAccessProfile, GatewayAccessProfiles, GatewayTarget};
-use crate::platforms::openai::codex::team_profiles::{
-    normalize_member_code, team_profile_presets,
-};
+use crate::platforms::openai::codex::team_profiles::{normalize_member_code, team_profile_presets};
 
 pub(crate) fn generate_antigravity_gateway_api_key(member_code: &str) -> String {
     let normalized = normalize_member_code(member_code).unwrap_or_else(|| "member".to_string());
