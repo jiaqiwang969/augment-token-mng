@@ -141,6 +141,7 @@ pub async fn start_api_server_cmd(
             codex_archive_storage: state.codex_archive_storage.clone(),
             proxy_config: state.proxy_config.clone(),
             augment_sidecar: state.augment_sidecar.clone(),
+            antigravity_sidecar: state.antigravity_sidecar.clone(),
         }),
         8766,
     )
@@ -178,6 +179,7 @@ pub async fn stop_api_server(
     if let Some(mut server) = server {
         server.shutdown();
         stop_managed_augment_sidecar(&state.augment_sidecar).await;
+        stop_managed_antigravity_sidecar(&state.antigravity_sidecar).await;
         // 同步清除 Codex 服务器状态
         *state.codex_server.lock().unwrap() = None;
         println!("🛑 API Server stopped");
@@ -208,9 +210,37 @@ pub(crate) async fn stop_managed_augment_sidecar(
     }
 }
 
+pub(crate) async fn stop_managed_antigravity_sidecar(
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>,
+    >,
+) {
+    let sidecar = {
+        let mut guard = managed_sidecar.lock().await;
+        guard.take()
+    };
+
+    if let Some(mut sidecar) = sidecar {
+        sidecar.stop().await;
+        let mut guard = managed_sidecar.lock().await;
+        *guard = Some(sidecar);
+    }
+}
+
 pub(crate) fn stop_managed_augment_sidecar_blocking(
     managed_sidecar: &tokio::sync::Mutex<
         Option<crate::platforms::augment::sidecar::AugmentSidecar>,
+    >,
+) {
+    let mut guard = managed_sidecar.blocking_lock();
+    if let Some(sidecar) = guard.as_mut() {
+        sidecar.force_stop();
+    }
+}
+
+pub(crate) fn stop_managed_antigravity_sidecar_blocking(
+    managed_sidecar: &tokio::sync::Mutex<
+        Option<crate::platforms::antigravity::sidecar::AntigravitySidecar>,
     >,
 ) {
     let mut guard = managed_sidecar.blocking_lock();
@@ -431,11 +461,18 @@ async fn handle_unified_gateway_request(
             )
             .await
         }
-        crate::core::gateway_access::GatewayTarget::Antigravity => Err(warp::reject::custom(
-            crate::platforms::openai::codex::server::CodexRejection::ExecutionError(
-                "Antigravity gateway target is not implemented yet".to_string(),
-            ),
-        )),
+        crate::core::gateway_access::GatewayTarget::Antigravity => {
+            crate::platforms::antigravity::api_service::server::handle_unified_gateway_request(
+                raw_path,
+                method,
+                query,
+                headers,
+                body,
+                Some(profile),
+                state,
+            )
+            .await
+        }
     }
 }
 
@@ -1112,6 +1149,36 @@ pub(crate) async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejec
                 warp::http::StatusCode::BAD_GATEWAY,
                 msg.as_str(),
                 "augment_upstream_error",
+            ),
+        };
+        Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "error": {
+                    "message": message,
+                    "type": code,
+                    "code": status.as_u16().to_string()
+                }
+            })),
+            status,
+        ))
+    } else if let Some(rej) = err
+        .find::<crate::platforms::antigravity::api_service::server::AntigravityProxyRejection>()
+    {
+        let (status, message, code) = match rej {
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::NoAccounts(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "no_antigravity_accounts",
+            ),
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::SidecarNotReady(msg) => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                msg.as_str(),
+                "antigravity_sidecar_not_ready",
+            ),
+            crate::platforms::antigravity::api_service::server::AntigravityProxyRejection::UpstreamError(msg) => (
+                warp::http::StatusCode::BAD_GATEWAY,
+                msg.as_str(),
+                "antigravity_upstream_error",
             ),
         };
         Ok(warp::reply::with_status(

@@ -1,7 +1,16 @@
 use crate::platforms::antigravity::models::Account;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use tokio::process::Child;
+use std::process::Stdio;
+use tokio::process::{Child, Command};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SidecarRuntimeMetadata {
+    pid: u32,
+    config_path: PathBuf,
+    binary_path: PathBuf,
+}
 
 pub struct AntigravitySidecar {
     port: u16,
@@ -11,7 +20,6 @@ pub struct AntigravitySidecar {
     config_path: PathBuf,
     runtime_path: PathBuf,
     api_key: String,
-    #[allow(dead_code)]
     binary_path: PathBuf,
 }
 
@@ -27,6 +35,10 @@ impl AntigravitySidecar {
             api_key: format!("sk-atm-antigravity-internal-{}", uuid::Uuid::new_v4()),
             binary_path,
         }
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
     }
 
     pub fn api_key(&self) -> &str {
@@ -49,9 +61,83 @@ impl AntigravitySidecar {
         self.child.is_some()
     }
 
+    pub async fn is_healthy(&self) -> bool {
+        if self.port == 0 {
+            return false;
+        }
+
+        probe_sidecar_health(&self.base_url(), &self.api_key).await
+    }
+
     #[cfg(test)]
     pub(crate) fn set_port_for_test(&mut self, port: u16) {
         self.port = port;
+    }
+
+    pub async fn start(&mut self, accounts: &[Account]) -> Result<(), String> {
+        if self.child.is_some() {
+            return Ok(());
+        }
+
+        self.port = find_available_port().map_err(|e| format!("Failed to find port: {}", e))?;
+
+        std::fs::create_dir_all(&self.auth_dir)
+            .map_err(|e| format!("Failed to create auth dir: {}", e))?;
+        std::fs::create_dir_all(&self.home_dir)
+            .map_err(|e| format!("Failed to create sidecar home dir: {}", e))?;
+
+        self.sync_accounts(accounts)?;
+        self.write_config()?;
+
+        let mut command = Command::new(&self.binary_path);
+        command
+            .arg("-config")
+            .arg(&self.config_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        for (key, value) in sidecar_process_env(&self.home_dir) {
+            command.env(key, value);
+        }
+
+        let child = command
+            .spawn()
+            .map_err(|e| format!("Failed to start cliproxy-server: {}", e))?;
+
+        self.child = Some(child);
+        self.persist_runtime_metadata()?;
+        self.wait_healthy(10).await?;
+        Ok(())
+    }
+
+    pub async fn ensure_running(&mut self, accounts: &[Account]) -> Result<(), String> {
+        let child_alive = if let Some(child) = self.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.child = None;
+                    false
+                }
+                Ok(None) => true,
+                Err(_) => {
+                    self.child = None;
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if child_alive {
+            self.sync_accounts(accounts)?;
+            if self.is_healthy().await {
+                return Ok(());
+            }
+
+            self.stop().await;
+        }
+
+        self.start(accounts).await
     }
 
     pub fn write_config(&self) -> Result<(), String> {
@@ -150,11 +236,42 @@ impl AntigravitySidecar {
         self.cleanup_runtime_files();
     }
 
+    async fn wait_healthy(&self, max_seconds: u64) -> Result<(), String> {
+        for _ in 0..max_seconds * 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if self.is_healthy().await {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Antigravity sidecar health check failed after {}s",
+            max_seconds
+        ))
+    }
+
     fn cleanup_runtime_files(&self) {
         let _ = std::fs::remove_dir_all(&self.auth_dir);
         let _ = std::fs::remove_dir_all(&self.home_dir);
         let _ = std::fs::remove_file(&self.config_path);
         let _ = std::fs::remove_file(&self.runtime_path);
+    }
+
+    fn persist_runtime_metadata(&self) -> Result<(), String> {
+        let Some(pid) = self.child.as_ref().and_then(|child| child.id()) else {
+            return Ok(());
+        };
+
+        let metadata = SidecarRuntimeMetadata {
+            pid,
+            config_path: self.config_path.clone(),
+            binary_path: self.binary_path.clone(),
+        };
+        let raw = serde_json::to_vec(&metadata)
+            .map_err(|e| format!("Failed to serialize Antigravity sidecar metadata: {}", e))?;
+
+        std::fs::write(&self.runtime_path, raw)
+            .map_err(|e| format!("Failed to write Antigravity sidecar metadata: {}", e))
     }
 }
 
@@ -162,6 +279,13 @@ impl Drop for AntigravitySidecar {
     fn drop(&mut self) {
         self.force_stop();
     }
+}
+
+fn find_available_port() -> Result<u16, std::io::Error> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
 }
 
 fn build_config_yaml(port: u16, auth_dir: &Path, api_key: &str) -> String {
@@ -255,10 +379,65 @@ fn yaml_double_quoted(value: &str) -> String {
     )
 }
 
+fn sidecar_process_env(home_dir: &Path) -> Vec<(&'static str, PathBuf)> {
+    let home_dir = home_dir.to_path_buf();
+    let mut env = vec![
+        ("HOME", home_dir.clone()),
+        ("USERPROFILE", home_dir.clone()),
+    ];
+
+    if let Some((drive, path)) = split_windows_home_components(&home_dir) {
+        env.push(("HOMEDRIVE", PathBuf::from(drive)));
+        env.push(("HOMEPATH", PathBuf::from(path)));
+    }
+
+    env
+}
+
+pub(crate) async fn probe_sidecar_health(base_url: &str, api_key: &str) -> bool {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+
+    match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(body) => models_payload_is_ready(body.as_ref()),
+            Err(_) => false,
+        },
+        _ => false,
+    }
+}
+
+fn split_windows_home_components(home_dir: &Path) -> Option<(String, String)> {
+    let normalized = home_dir.to_string_lossy().replace('/', "\\");
+    let bytes = normalized.as_bytes();
+
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return None;
+    }
+
+    Some((normalized[..2].to_string(), normalized[2..].to_string()))
+}
+
+fn models_payload_is_ready(body: &[u8]) -> bool {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    json.get("data")
+        .and_then(|data| data.as_array())
+        .is_some_and(|models| !models.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platforms::antigravity::models::{Account, QuotaData, TokenData};
+    use crate::platforms::antigravity::models::{QuotaData, TokenData};
     use chrono::{TimeZone, Utc};
     use serde_json::Value;
     use std::fs;

@@ -42,10 +42,9 @@ pub use platforms::{antigravity, augment, claude, cursor, openai, windsurf};
 use crate::core::tray::TrayState;
 use crate::data::subscription::SubscriptionDualStorage;
 use crate::features::mail::{gptmail, hme, hme_storage::HmeStorage, outlook};
+use crate::platforms::antigravity::sidecar::AntigravitySidecar;
 use crate::platforms::augment::models::AugmentOAuthState;
 use crate::platforms::augment::sidecar::AugmentSidecar;
-#[cfg(test)]
-use crate::platforms::antigravity::sidecar::AntigravitySidecar;
 use crate::platforms::openai::codex::archive_storage::CodexArchiveStorage;
 use crate::platforms::openai::codex::logger::RequestLogger;
 use crate::platforms::openai::codex::pool::CodexServerConfig;
@@ -106,6 +105,7 @@ pub struct AppState {
     pub proxy_config: Arc<Mutex<Option<crate::core::proxy_config::ProxyConfig>>>,
     // Augment API 代理 sidecar
     pub augment_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
+    pub antigravity_sidecar: Arc<tokio::sync::Mutex<Option<AntigravitySidecar>>>,
 }
 
 fn resolve_augment_sidecar_binary(
@@ -344,6 +344,16 @@ pub fn run() {
                         &fallback_binary,
                     );
                     binary.map(|b| AugmentSidecar::new(&app_data_dir, b))
+                })),
+                antigravity_sidecar: Arc::new(tokio::sync::Mutex::new({
+                    let fallback_binary = std::path::PathBuf::from("/tmp/cliproxy-server");
+                    let resource_dir = app.handle().path().resource_dir().ok();
+                    let binary = resolve_augment_sidecar_binary(
+                        resource_dir.as_deref(),
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                        &fallback_binary,
+                    );
+                    binary.map(|b| AntigravitySidecar::new(&app_data_dir, b))
                 })),
             };
 
@@ -590,6 +600,7 @@ pub fn run() {
                         codex_archive_storage: state.codex_archive_storage.clone(),
                         proxy_config: state.proxy_config.clone(),
                         augment_sidecar: state.augment_sidecar.clone(),
+                        antigravity_sidecar: state.antigravity_sidecar.clone(),
                     }),
                     8766,
                 ).await {
@@ -1002,10 +1013,14 @@ pub fn run() {
                 crate::core::api_server::stop_managed_augment_sidecar_blocking(
                     &state.augment_sidecar,
                 );
+                crate::core::api_server::stop_managed_antigravity_sidecar_blocking(
+                    &state.antigravity_sidecar,
+                );
             }
         });
 }
 
+#[cfg(test)]
 async fn cleanup_managed_sidecar_on_shutdown<F>(
     managed_sidecar: Arc<tokio::sync::Mutex<Option<AugmentSidecar>>>,
     shutdown_signal: F,
@@ -1063,11 +1078,15 @@ async fn wait_for_termination_signal() {
 }
 
 fn install_termination_cleanup(app: &tauri::AppHandle) {
-    let managed_sidecar = app.state::<AppState>().augment_sidecar.clone();
+    let managed_augment_sidecar = app.state::<AppState>().augment_sidecar.clone();
+    let managed_antigravity_sidecar = app.state::<AppState>().antigravity_sidecar.clone();
     let app_handle = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        cleanup_managed_sidecar_on_shutdown(managed_sidecar, wait_for_termination_signal()).await;
+        wait_for_termination_signal().await;
+        crate::core::api_server::stop_managed_augment_sidecar(&managed_augment_sidecar).await;
+        crate::core::api_server::stop_managed_antigravity_sidecar(&managed_antigravity_sidecar)
+            .await;
         app_handle.exit(0);
     });
 }
