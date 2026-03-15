@@ -13,6 +13,7 @@ pub mod executor;
 pub mod logger;
 pub mod models;
 pub mod pool;
+pub mod relay;
 pub mod server;
 pub mod storage;
 pub mod team_profiles;

@@ -244,7 +244,7 @@ fn write_persisted_config(
     Ok(())
 }
 
-fn get_or_load_codex_config(
+pub(crate) fn get_or_load_codex_config(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<CodexServerConfig, String> {
@@ -264,7 +264,7 @@ fn get_or_load_codex_config(
     Ok(config)
 }
 
-fn current_api_server_port(state: &AppState) -> u16 {
+pub(crate) fn current_api_server_port(state: &AppState) -> u16 {
     state
         .api_server
         .lock()
@@ -274,7 +274,7 @@ fn current_api_server_port(state: &AppState) -> u16 {
         .unwrap_or(SHARED_API_SERVER_PORT)
 }
 
-fn gateway_server_url(port: u16) -> String {
+pub(crate) fn gateway_server_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/v1", port)
 }
 
@@ -575,7 +575,7 @@ fn delete_codex_gateway_profile_in_profiles(
     }
 }
 
-fn gateway_api_key_for_target(
+pub(crate) fn gateway_api_key_for_target(
     app: &tauri::AppHandle,
     state: &AppState,
     target: GatewayTarget,
@@ -657,6 +657,10 @@ async fn apply_periodic_tasks(app: tauri::AppHandle, state: &AppState, config: &
     }
 }
 
+async fn refresh_relay_health_snapshot(app: &tauri::AppHandle, state: &AppState) {
+    let _ = super::relay::refresh_codex_relay_health_snapshot(app, state).await;
+}
+
 async fn init_codex_runtime(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -719,6 +723,9 @@ pub async fn init_codex_enabled_state_on_startup(
 
     *state.codex_server_config.lock().unwrap() = Some(config.clone());
     write_persisted_config(app, &config)?;
+    if config.enabled {
+        refresh_relay_health_snapshot(app, state).await;
+    }
     Ok(())
 }
 
@@ -793,6 +800,7 @@ pub async fn start_codex_server(
     *state.codex_server_config.lock().unwrap() = Some(config.clone());
     write_persisted_config(&app, &config)?;
     apply_periodic_tasks(app.clone(), state.inner(), &config).await;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     Ok(())
 }
 
@@ -813,6 +821,7 @@ pub async fn stop_codex_server(
         *state.codex_server_config.lock().unwrap() = Some(config.clone());
         write_persisted_config(&app, &config)?;
         apply_periodic_tasks(app.clone(), state.inner(), &config).await;
+        refresh_relay_health_snapshot(&app, state.inner()).await;
         println!("Codex routes disabled");
         Ok(())
     } else {
@@ -1030,6 +1039,7 @@ pub async fn set_codex_access_config(
     *state.codex_server_config.lock().unwrap() = Some(config.clone());
     write_persisted_config(&app, &config)?;
     sync_codex_gateway_profile(&app, state.inner(), config.api_key.clone())?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
 
     Ok(CodexAccessConfig {
         server_url: gateway_server_url(current_api_server_port(state.inner())),
@@ -1081,6 +1091,7 @@ pub async fn create_codex_gateway_profile(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     codex_gateway_profile_entry_by_id(&profiles, &created_id)
         .map_err(|_| "Failed to load created Codex gateway profile".to_string())
 }
@@ -1120,6 +1131,7 @@ pub async fn update_codex_gateway_profile(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     codex_gateway_profile_entry_by_id(&profiles, &updated_id)
         .map_err(|_| "Failed to load updated Codex gateway profile".to_string())
 }
@@ -1135,6 +1147,7 @@ pub async fn import_codex_team_template(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     Ok(codex_gateway_profiles(&profiles))
 }
 
@@ -1151,6 +1164,7 @@ pub async fn regenerate_codex_gateway_profile_api_key(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     codex_gateway_profile_entry_by_id(&profiles, &updated_id)
         .map_err(|_| "Failed to load regenerated Codex gateway profile".to_string())
 }
@@ -1169,6 +1183,7 @@ pub async fn reset_codex_gateway_profile_to_team_defaults(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     codex_gateway_profile_entry_by_id(&profiles, &updated_id)
         .map_err(|_| "Failed to load reset Codex gateway profile".to_string())
 }
@@ -1186,6 +1201,7 @@ pub async fn delete_codex_gateway_profile(
     let profiles =
         crate::core::gateway_access::set_gateway_access_profiles(&app, state.inner(), profiles)?;
     sync_codex_config_api_key_from_profiles(&app, state.inner(), &profiles)?;
+    refresh_relay_health_snapshot(&app, state.inner()).await;
     Ok(())
 }
 
