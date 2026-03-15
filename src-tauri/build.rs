@@ -1,3 +1,6 @@
+#[path = "build_support/cliproxy_build.rs"]
+mod cliproxy_build;
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,12 +24,14 @@ fn main() {
 fn build_cliproxy() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
     let repo_root = manifest_dir
         .parent()
         .expect("src-tauri should have a repository root parent")
         .to_path_buf();
     let script_path = repo_root.join("scripts").join("build-cliproxy.sh");
     let output_path = manifest_dir.join("resources").join("cliproxy-server");
+    let staging_output_path = out_dir.join("cliproxy-server");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS is not set");
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH is not set");
 
@@ -42,7 +47,7 @@ fn build_cliproxy() {
         .current_dir(&repo_root)
         .env("GOOS", map_target_os(&target_os))
         .env("GOARCH", map_target_arch(&target_arch))
-        .env("OUTPUT_PATH", &output_path)
+        .env("OUTPUT_PATH", &staging_output_path)
         .status()
         .unwrap_or_else(|error| {
             panic!(
@@ -55,6 +60,16 @@ fn build_cliproxy() {
     if !status.success() {
         panic!("cliproxy build script failed with status: {}", status);
     }
+
+    cliproxy_build::replace_file_if_changed(&staging_output_path, &output_path).unwrap_or_else(
+        |error| {
+            panic!(
+                "failed to sync cliproxy binary into {}: {}",
+                output_path.display(),
+                error
+            )
+        },
+    );
 }
 
 fn map_target_os(target_os: &str) -> &str {
