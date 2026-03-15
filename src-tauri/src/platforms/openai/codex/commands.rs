@@ -5,7 +5,7 @@ use std::fs;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ use super::models::{
     DailyStatsResponse, GatewayDailyStatsResponse, LogPage, LogQuery, ModelTokenStats,
     PeriodTokenStats, PoolStrategy, RequestLog, TokenStats,
 };
-use super::pool::{CodexServerConfig, CodexServerStatus};
+use super::pool::{CodexRelayHealthSnapshot, CodexServerConfig, CodexServerStatus};
 use super::team_profiles::{
     TeamProfilePreset, generate_team_gateway_api_key, import_team_template_into_profiles,
     normalize_member_code, team_profile_presets,
@@ -33,6 +33,7 @@ static QUOTA_REFRESH_TASK: std::sync::LazyLock<TokioMutex<Option<tokio::task::Jo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexAccessConfig {
     pub server_url: String,
+    pub public_base_url: String,
     pub api_key: Option<String>,
 }
 
@@ -651,9 +652,21 @@ fn normalize_gateway_profile_name(name: Option<String>) -> Option<String> {
 
 async fn apply_periodic_tasks(app: tauri::AppHandle, state: &AppState, config: &CodexServerConfig) {
     if config.enabled && config.quota_refresh_enabled {
-        start_periodic_quota_refresh(app, state, config.quota_refresh_interval_seconds).await;
+        start_periodic_quota_refresh(app.clone(), state, config.quota_refresh_interval_seconds)
+            .await;
     } else {
         stop_periodic_quota_refresh().await;
+    }
+
+    if config.enabled {
+        start_periodic_relay_health_refresh(
+            app,
+            state,
+            config.relay.health_check_interval_seconds,
+        )
+        .await;
+    } else {
+        stop_periodic_relay_health_refresh(state).await;
     }
 }
 
@@ -697,6 +710,59 @@ async fn init_codex_runtime(
     }
 
     Ok(())
+}
+
+fn sync_running_codex_route(state: &AppState, config: &CodexServerConfig) {
+    *state.codex_server.lock().unwrap() = Some(CodexServer::new(config.port));
+}
+
+pub(crate) async fn ensure_local_codex_relay_core_running(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<CodexServerConfig, String> {
+    let mut config = get_or_load_codex_config(app, state)?;
+    config.enabled = true;
+    normalize_access_fields(&mut config);
+    normalize_server_port(&mut config);
+    normalize_runtime_fields(&mut config);
+
+    if state.api_server.lock().unwrap().is_none() {
+        let server =
+            crate::core::api_server::start_api_server(
+                crate::core::api_server::clone_runtime_app_state(state),
+                SHARED_API_SERVER_PORT,
+            )
+            .await?;
+        *state.api_server.lock().unwrap() = Some(server);
+        let _ = app.emit("api-server-status-changed", true);
+    }
+
+    init_codex_runtime(app, state, &config).await?;
+    sync_running_codex_route(state, &config);
+    *state.codex_server_config.lock().unwrap() = Some(config.clone());
+    write_persisted_config(app, &config)?;
+
+    Ok(config)
+}
+
+pub(crate) async fn ensure_local_codex_relay_running(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    manage_periodic_tasks: bool,
+) -> Result<(), String> {
+    let config = ensure_local_codex_relay_core_running(app, state).await?;
+
+    if manage_periodic_tasks {
+        apply_periodic_tasks(app.clone(), state, &config).await;
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn handle_api_server_stopped(app: &tauri::AppHandle, state: &AppState) {
+    stop_periodic_quota_refresh().await;
+    stop_periodic_relay_health_refresh(state).await;
+    let _ = super::relay::refresh_codex_relay_health_snapshot(app, state).await;
 }
 
 pub async fn init_codex_enabled_state_on_startup(
@@ -1015,8 +1081,10 @@ pub async fn get_codex_access_config(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CodexAccessConfig, String> {
+    let config = get_or_load_codex_config(&app, state.inner())?;
     Ok(CodexAccessConfig {
         server_url: gateway_server_url(current_api_server_port(state.inner())),
+        public_base_url: super::relay::resolved_public_relay_base_url(&config.relay),
         api_key: gateway_api_key_for_target(
             &app,
             state.inner(),
@@ -1043,8 +1111,32 @@ pub async fn set_codex_access_config(
 
     Ok(CodexAccessConfig {
         server_url: gateway_server_url(current_api_server_port(state.inner())),
+        public_base_url: super::relay::resolved_public_relay_base_url(&config.relay),
         api_key: gateway_api_key_for_target(&app, state.inner(), GatewayTarget::Codex)?,
     })
+}
+
+#[tauri::command]
+pub async fn get_codex_relay_health_status(
+    state: State<'_, AppState>,
+) -> Result<CodexRelayHealthSnapshot, String> {
+    Ok(state.codex_relay_health_snapshot.lock().unwrap().clone())
+}
+
+#[tauri::command]
+pub async fn refresh_codex_relay_health_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CodexRelayHealthSnapshot, String> {
+    Ok(super::relay::refresh_codex_relay_health_snapshot(&app, state.inner()).await)
+}
+
+#[tauri::command]
+pub async fn repair_codex_relay_health(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CodexRelayHealthSnapshot, String> {
+    super::relay::repair_codex_relay_health(&app, state.inner(), true).await
 }
 
 #[tauri::command]
@@ -1649,6 +1741,61 @@ async fn stop_periodic_quota_refresh() {
     if let Some(handle) = task.take() {
         handle.abort();
         println!("[Codex] Periodic quota refresh task stopped");
+    }
+}
+
+async fn start_periodic_relay_health_refresh(
+    app: tauri::AppHandle,
+    state: &AppState,
+    interval_seconds: u64,
+) {
+    stop_periodic_relay_health_refresh(state).await;
+
+    let shared_state = crate::core::api_server::clone_runtime_app_state(state);
+    let tick_seconds = interval_seconds.max(1);
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(tick_seconds));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let snapshot =
+                crate::platforms::openai::codex::relay::refresh_codex_relay_health_snapshot(
+                    &app,
+                    shared_state.as_ref(),
+                )
+                .await;
+
+            let should_attempt_repair = match get_or_load_codex_config(&app, shared_state.as_ref())
+            {
+                Ok(config) => {
+                    config.enabled
+                        && config.relay.auto_repair_enabled
+                        && !crate::platforms::openai::codex::relay::build_repair_sequence(
+                            &snapshot,
+                        )
+                        .is_empty()
+                }
+                Err(_) => false,
+            };
+
+            if should_attempt_repair {
+                let _ = crate::platforms::openai::codex::relay::repair_codex_relay_health_auto(
+                    &app,
+                    shared_state.as_ref(),
+                )
+                .await;
+            }
+        }
+    });
+
+    *state.codex_relay_health_task.lock().await = Some(handle);
+}
+
+pub(crate) async fn stop_periodic_relay_health_refresh(state: &AppState) {
+    let mut task = state.codex_relay_health_task.lock().await;
+    if let Some(handle) = task.take() {
+        handle.abort();
+        println!("[Codex] Periodic relay health task stopped");
     }
 }
 

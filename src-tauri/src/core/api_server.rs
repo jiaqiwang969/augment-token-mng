@@ -100,6 +100,41 @@ pub async fn get_api_server_status(state: State<'_, AppState>) -> Result<ApiServ
     }
 }
 
+pub(crate) fn clone_runtime_app_state(state: &AppState) -> Arc<AppState> {
+    Arc::new(AppState {
+        augment_oauth_state: Mutex::new(None),
+        openai_oauth_sessions: state.openai_oauth_sessions.clone(),
+        api_server: Mutex::new(None),
+        outlook_manager: Mutex::new(OutlookManager::new()),
+        hme_cookie: state.hme_cookie.clone(),
+        hme_storage: state.hme_storage.clone(),
+        storage_manager: state.storage_manager.clone(),
+        antigravity_storage_manager: state.antigravity_storage_manager.clone(),
+        windsurf_storage_manager: state.windsurf_storage_manager.clone(),
+        cursor_storage_manager: state.cursor_storage_manager.clone(),
+        openai_storage_manager: state.openai_storage_manager.clone(),
+        claude_storage_manager: state.claude_storage_manager.clone(),
+        subscription_storage_manager: state.subscription_storage_manager.clone(),
+        database_manager: state.database_manager.clone(),
+        app_session_cache: state.app_session_cache.clone(),
+        app_handle: state.app_handle.clone(),
+        codex_pool: state.codex_pool.clone(),
+        codex_executor: state.codex_executor.clone(),
+        codex_logger: state.codex_logger.clone(),
+        codex_server: state.codex_server.clone(),
+        codex_unsupported_params: state.codex_unsupported_params.clone(),
+        codex_server_config: state.codex_server_config.clone(),
+        codex_relay_health_snapshot: state.codex_relay_health_snapshot.clone(),
+        codex_relay_health_task: state.codex_relay_health_task.clone(),
+        gateway_access_profiles: state.gateway_access_profiles.clone(),
+        codex_log_storage: state.codex_log_storage.clone(),
+        codex_archive_storage: state.codex_archive_storage.clone(),
+        proxy_config: state.proxy_config.clone(),
+        augment_sidecar: state.augment_sidecar.clone(),
+        antigravity_sidecar: state.antigravity_sidecar.clone(),
+    })
+}
+
 #[tauri::command]
 pub async fn start_api_server_cmd(
     app: tauri::AppHandle,
@@ -113,38 +148,7 @@ pub async fn start_api_server_cmd(
     }
 
     let server = start_api_server(
-        Arc::new(AppState {
-            augment_oauth_state: Mutex::new(None),
-            openai_oauth_sessions: state.openai_oauth_sessions.clone(),
-            api_server: Mutex::new(None),
-            outlook_manager: Mutex::new(OutlookManager::new()),
-            hme_cookie: state.hme_cookie.clone(),
-            hme_storage: state.hme_storage.clone(),
-            storage_manager: state.storage_manager.clone(),
-            antigravity_storage_manager: state.antigravity_storage_manager.clone(),
-            windsurf_storage_manager: state.windsurf_storage_manager.clone(),
-            cursor_storage_manager: state.cursor_storage_manager.clone(),
-            openai_storage_manager: state.openai_storage_manager.clone(),
-            claude_storage_manager: state.claude_storage_manager.clone(),
-            subscription_storage_manager: state.subscription_storage_manager.clone(),
-            database_manager: state.database_manager.clone(),
-            app_session_cache: state.app_session_cache.clone(),
-            app_handle: state.app_handle.clone(),
-            codex_pool: state.codex_pool.clone(),
-            codex_executor: state.codex_executor.clone(),
-            codex_logger: state.codex_logger.clone(),
-            codex_server: state.codex_server.clone(),
-            codex_unsupported_params: state.codex_unsupported_params.clone(),
-            codex_server_config: state.codex_server_config.clone(),
-            codex_relay_health_snapshot: state.codex_relay_health_snapshot.clone(),
-            codex_relay_health_task: state.codex_relay_health_task.clone(),
-            gateway_access_profiles: state.gateway_access_profiles.clone(),
-            codex_log_storage: state.codex_log_storage.clone(),
-            codex_archive_storage: state.codex_archive_storage.clone(),
-            proxy_config: state.proxy_config.clone(),
-            augment_sidecar: state.augment_sidecar.clone(),
-            antigravity_sidecar: state.antigravity_sidecar.clone(),
-        }),
+        clone_runtime_app_state(state.inner()),
         8766,
     )
     .await?;
@@ -184,6 +188,8 @@ pub async fn stop_api_server(
         stop_managed_antigravity_sidecar(&state.antigravity_sidecar).await;
         // 同步清除 Codex 服务器状态
         *state.codex_server.lock().unwrap() = None;
+        crate::platforms::openai::codex::commands::handle_api_server_stopped(&app, state.inner())
+            .await;
         println!("🛑 API Server stopped");
 
         // 通知前端 API 服务器状态变化

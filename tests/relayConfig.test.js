@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 
 const loadModule = async () => {
   try {
@@ -148,4 +149,49 @@ server {
   assert.match(updated, /location = \/v1\/models/)
   assert.match(updated, /location \/ \{\n        proxy_pass http:\/\/webui;/)
   assert.ok(updated.indexOf('/v1/models') < updated.indexOf('location / {'))
+})
+
+test('check_remote_relay.sh fails fast on non-2xx responses and validates model payloads', async () => {
+  const scriptPath = path.resolve('scripts/check_remote_relay.sh')
+  const source = await readFile(scriptPath, 'utf8')
+
+  assert.match(source, /http_code/)
+  assert.match(source, /Expected 2xx/)
+  assert.match(source, /JSON\.parse/)
+  assert.match(source, /data.*Array\.isArray/s)
+})
+
+test('load_relay_env.sh preserves explicit environment overrides over file defaults', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'atm-relay-shell-env-'))
+  const envPath = path.join(tempDir, '.env.relay')
+  const scriptPath = path.resolve('scripts/load_relay_env.sh')
+  const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`
+
+  await writeFile(
+    envPath,
+    [
+      'ATM_RELAY_API_KEY=sk-from-file',
+      'ATM_RELAY_HOST=ubuntu@from-file'
+    ].join('\n')
+  )
+
+  const result = spawnSync(
+    'bash',
+    [
+      '-lc',
+      `source ${shellQuote(scriptPath)}; load_relay_env; printf '%s' "$ATM_RELAY_API_KEY"`
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ATM_RELAY_ENV_FILE: envPath,
+        ATM_RELAY_API_KEY: 'sk-from-env'
+      }
+    }
+  )
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, 'sk-from-env')
 })

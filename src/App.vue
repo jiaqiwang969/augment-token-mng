@@ -105,7 +105,8 @@
           </nav>
 
           <!-- Sidebar Bottom: Controls -->
-          <div class="mt-auto border-t border-border mb-3">
+          <div class="mt-auto border-t border-border">
+            <div class="pb-2">
             <!-- Open Data Folder Button -->
             <button
               type="button"
@@ -182,6 +183,9 @@
               </svg>
               <span v-if="!isSidebarCollapsed" class="flex-1 min-w-0 truncate">{{ $t('app.settings') }}</span>
             </button>
+            </div>
+
+            <CodexRelayStatusChip :collapsed="isSidebarCollapsed" />
           </div>
         </div>
       </aside>
@@ -256,6 +260,7 @@ import ConfirmManager from './components/common/ConfirmManager.vue'
 import UpdateBanner from './components/common/UpdateBanner.vue'
 import ApiServerStatus from './components/settings/ApiServerStatus.vue'
 import PlatformSelector from './components/platforms/PlatformSelector.vue'
+import CodexRelayStatusChip from './components/openai/CodexRelayStatusChip.vue'
 import BookmarkPage from './components/pages/BookmarkPage.vue'
 import EmailPage from './components/pages/EmailPage.vue'
 import SettingsPage from './components/pages/SettingsPage.vue'

@@ -77,6 +77,80 @@
           </div>
         </div>
 
+        <section class="rounded-2xl border border-border bg-bg-base/40 p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <label class="label mb-0">{{ $t('platform.openai.codexDialog.relayHealthTitle') }}</label>
+              <p class="mt-1 text-[12px] text-text-muted">
+                {{ $t('platform.openai.codexDialog.relayHealthHint') }}
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <span :class="['badge badge--sm', overallRelayBadgeClass]">
+                {{ overallRelayStatusText }}
+              </span>
+              <button class="btn btn--secondary btn--sm" :disabled="isRelayRefreshing" @click="refreshRelayHealth">
+                <span v-if="isRelayRefreshing" class="btn-spinner" aria-hidden="true"></span>
+                {{ $t('platform.openai.codexDialog.relayRefreshNow') }}
+              </button>
+              <button class="btn btn--primary btn--sm" :disabled="isRepairingRelay" @click="repairRelayHealth">
+                <span v-if="isRepairingRelay" class="btn-spinner" aria-hidden="true"></span>
+                {{ $t('platform.openai.codexDialog.relayRepairNow') }}
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-4 grid gap-3 lg:grid-cols-2">
+            <article
+              v-for="row in relayHealthRows"
+              :key="row.id"
+              class="rounded-xl border border-border bg-muted/10 p-3"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span :class="['h-2.5 w-2.5 rounded-full shrink-0', row.indicatorClass]"></span>
+                    <span class="text-[13px] font-semibold text-text-secondary">{{ row.label }}</span>
+                  </div>
+                  <p class="m-0 mt-2 truncate font-mono text-[11px] text-text-muted" :title="row.url">
+                    {{ row.url }}
+                  </p>
+                </div>
+                <span :class="['badge badge--sm', row.badgeClass]">
+                  {{ row.statusText }}
+                </span>
+              </div>
+
+              <dl class="mt-4 grid gap-2 text-[11px] text-text-muted sm:grid-cols-2">
+                <div>
+                  <dt>{{ $t('platform.openai.codexDialog.relayLastChecked') }}</dt>
+                  <dd class="mt-1 text-text-secondary">{{ row.lastCheckedText }}</dd>
+                </div>
+                <div>
+                  <dt>{{ $t('platform.openai.codexDialog.relayLastSuccess') }}</dt>
+                  <dd class="mt-1 text-text-secondary">{{ row.lastSuccessText }}</dd>
+                </div>
+                <div>
+                  <dt>{{ $t('platform.openai.codexDialog.relayLastRepairAttempt') }}</dt>
+                  <dd class="mt-1 text-text-secondary">{{ row.lastRepairAttemptText }}</dd>
+                </div>
+                <div>
+                  <dt>{{ $t('platform.openai.codexDialog.relayCooldownUntil') }}</dt>
+                  <dd class="mt-1 text-text-secondary">{{ row.cooldownText }}</dd>
+                </div>
+                <div class="sm:col-span-2">
+                  <dt>{{ $t('platform.openai.codexDialog.relayLastRepairResult') }}</dt>
+                  <dd class="mt-1 break-words text-text-secondary">{{ row.lastRepairResultText }}</dd>
+                </div>
+                <div class="sm:col-span-2">
+                  <dt>{{ $t('platform.openai.codexDialog.relayLastError') }}</dt>
+                  <dd class="mt-1 break-words text-danger">{{ row.lastError || '-' }}</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+        </section>
+
         <div class="grid gap-3 lg:grid-cols-2">
           <div class="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2">
             <span class="text-[13px] text-text-secondary">{{ $t('platform.openai.codexDialog.poolStrategy') }}</span>
@@ -672,6 +746,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '@/components/common/BaseModal.vue'
 import FloatingDropdown from '@/components/common/FloatingDropdown.vue'
@@ -698,7 +773,6 @@ const isCreatingProfile = ref(false)
 const activeTab = ref('overview')
 const showQuickSwitchModal = ref('') // 'codex' | 'droid' | ''
 const SHARED_PORT = 8766
-const publicServerUrl = 'https://lingkong.xyz/v1'
 const TEAM_MEMBER_ORDER = ['jdd', 'jqw', 'cr', 'lsb', 'will', 'cp', 'dlz', 'cw', 'xj', 'zdz']
 const TEAM_ANALYTICS_LIMIT = 5000
 const TEAM_ANALYTICS_REFRESH_MS = 15000
@@ -706,8 +780,16 @@ const TEAM_ANALYTICS_REFRESH_MS = 15000
 const serverStatus = ref({ running: false, address: `http://127.0.0.1:${SHARED_PORT}`, port: SHARED_PORT, poolStatus: null })
 const accessConfig = ref({
   serverUrl: `http://127.0.0.1:${SHARED_PORT}/v1`,
+  publicBaseUrl: '',
   apiKey: ''
 })
+const relayHealth = ref({
+  overall: { state: 'unknown' },
+  local: {},
+  public: {}
+})
+const isRelayRefreshing = ref(false)
+const isRepairingRelay = ref(false)
 const poolStatus = ref({
   totalAccounts: 0,
   activeAccounts: 0,
@@ -738,10 +820,14 @@ const memberEditorState = ref({
   profile: null
 })
 let lastMemberAnalyticsLoadedAt = 0
+let unlistenRelayHealth = null
 const primaryGatewayApiKey = computed(() => {
   const primary = gatewayProfiles.value.find(profile => profile.isPrimary)
   return primary?.apiKey || accessConfig.value.apiKey || ''
 })
+const publicServerUrl = computed(() =>
+  String(accessConfig.value.publicBaseUrl || '').trim() || 'https://lingkong.xyz/v1'
+)
 const memberAnalyticsByProfileId = computed(() =>
   new Map(memberAnalytics.value.map(entry => [entry.profileId, entry]))
 )
@@ -898,6 +984,119 @@ const formatTs = (ts) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+const normalizeRelayHealth = (payload) => {
+  const data = toCamel(payload || {})
+  return {
+    overall: data.overall || { state: 'unknown' },
+    local: data.local || {},
+    public: data.public || {}
+  }
+}
+
+const relayOverallStatusKey = computed(() => {
+  switch (relayHealth.value?.overall?.state) {
+    case 'healthy':
+      return 'platform.openai.codexDialog.relayStatusHealthy'
+    case 'local_down':
+      return 'platform.openai.codexDialog.relayStatusLocalDown'
+    case 'public_down':
+      return 'platform.openai.codexDialog.relayStatusPublicDown'
+    case 'in_progress':
+      return 'platform.openai.codexDialog.relayStatusInProgress'
+    default:
+      return 'platform.openai.codexDialog.relayStatusUnknown'
+  }
+})
+
+const overallRelayStatusText = computed(() => $t(relayOverallStatusKey.value))
+
+const overallRelayBadgeClass = computed(() => {
+  switch (relayHealth.value?.overall?.state) {
+    case 'healthy':
+      return 'badge--success-tech'
+    case 'public_down':
+      return 'badge--warning-tech'
+    case 'local_down':
+      return 'badge--danger-tech'
+    case 'in_progress':
+      return 'badge--accent-tech'
+    default:
+      return 'badge--warning-tech'
+  }
+})
+
+const relayStatusText = (layer, layerId) => {
+  if (layer?.repairInProgress) {
+    return $t('platform.openai.codexDialog.relayStatusInProgress')
+  }
+  if (layer?.healthy) {
+    return $t('platform.openai.codexDialog.relayStatusHealthy')
+  }
+  if (layer?.lastCheckedAt) {
+    return layerId === 'local'
+      ? $t('platform.openai.codexDialog.relayStatusLocalDown')
+      : $t('platform.openai.codexDialog.relayStatusPublicDown')
+  }
+  return $t('platform.openai.codexDialog.relayStatusUnknown')
+}
+
+const relayIndicatorClass = (layer) => {
+  if (layer?.repairInProgress) {
+    return 'bg-sky-500'
+  }
+  if (layer?.healthy) {
+    return 'bg-emerald-500'
+  }
+  if (layer?.lastCheckedAt) {
+    return 'bg-rose-500'
+  }
+  return 'bg-slate-400'
+}
+
+const relayBadgeClass = (layer) => {
+  if (layer?.repairInProgress) {
+    return 'badge--accent-tech'
+  }
+  if (layer?.healthy) {
+    return 'badge--success-tech'
+  }
+  if (layer?.lastCheckedAt) {
+    return 'badge--danger-tech'
+  }
+  return 'badge--warning-tech'
+}
+
+const relayHealthRows = computed(() => [
+  {
+    id: 'local',
+    label: $t('platform.openai.codexDialog.relayStatusLocal'),
+    url: accessConfig.value.serverUrl,
+    statusText: relayStatusText(relayHealth.value.local, 'local'),
+    indicatorClass: relayIndicatorClass(relayHealth.value.local),
+    badgeClass: relayBadgeClass(relayHealth.value.local),
+    lastCheckedText: formatTs(relayHealth.value.local?.lastCheckedAt),
+    lastSuccessText: formatTs(relayHealth.value.local?.lastSuccessAt),
+    lastError: relayHealth.value.local?.lastError || '',
+    lastRepairAttemptText: formatTs(relayHealth.value.local?.lastRepairAttemptAt),
+    lastRepairResultText: relayHealth.value.local?.lastRepairResult || '-',
+    cooldownText: formatTs(relayHealth.value.local?.cooldownUntil)
+  },
+  {
+    id: 'public',
+    label: $t('platform.openai.codexDialog.relayStatusPublic'),
+    url: publicServerUrl.value,
+    statusText: relayStatusText(relayHealth.value.public, 'public'),
+    indicatorClass: relayIndicatorClass(relayHealth.value.public),
+    badgeClass: relayBadgeClass(relayHealth.value.public),
+    lastCheckedText: formatTs(relayHealth.value.public?.lastCheckedAt),
+    lastSuccessText: formatTs(relayHealth.value.public?.lastSuccessAt),
+    lastError: relayHealth.value.public?.lastError || '',
+    lastRepairAttemptText: formatTs(relayHealth.value.public?.lastRepairAttemptAt),
+    lastRepairResultText: relayHealth.value.public?.lastRepairResult || '-',
+    cooldownText: formatTs(relayHealth.value.public?.cooldownUntil)
+  }
+])
+
 const formatDuration = (ms) => {
   const n = Number(ms || 0)
   if (n < 1000) return `${n}ms`
@@ -1013,6 +1212,78 @@ const copyText = async (text) => {
   }
 }
 
+const loadRelayHealth = async () => {
+  try {
+    const raw = await invoke('get_codex_relay_health_status')
+    relayHealth.value = normalizeRelayHealth(raw)
+  } catch {
+    relayHealth.value = normalizeRelayHealth(null)
+  }
+}
+
+const refreshRelayHealth = async () => {
+  if (isRelayRefreshing.value) {
+    return
+  }
+
+  isRelayRefreshing.value = true
+  try {
+    const raw = await invoke('refresh_codex_relay_health_status')
+    relayHealth.value = normalizeRelayHealth(raw)
+  } catch (error) {
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.relayRefreshFailed', { error: error?.message || error })
+    )
+  } finally {
+    isRelayRefreshing.value = false
+  }
+}
+
+const relayRepairSucceeded = (snapshot) =>
+  snapshot?.overall?.state === 'healthy' ||
+  (snapshot?.local?.healthy === true && snapshot?.public?.healthy === true)
+
+const relayRepairFailureMessage = (snapshot) => {
+  const candidates = [
+    snapshot?.public?.lastRepairResult,
+    snapshot?.public?.lastError,
+    snapshot?.local?.lastRepairResult,
+    snapshot?.local?.lastError
+  ]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+
+  return candidates[0] || $t('platform.openai.codexDialog.relayRepairStillFailing')
+}
+
+const repairRelayHealth = async () => {
+  if (isRepairingRelay.value) {
+    return
+  }
+
+  isRepairingRelay.value = true
+  try {
+    const raw = await invoke('repair_codex_relay_health')
+    const snapshot = normalizeRelayHealth(raw)
+    relayHealth.value = snapshot
+    if (relayRepairSucceeded(snapshot)) {
+      window.$notify?.success($t('platform.openai.codexDialog.relayRepairSuccess'))
+    } else {
+      window.$notify?.error(
+        $t('platform.openai.codexDialog.relayRepairFailed', {
+          error: relayRepairFailureMessage(snapshot)
+        })
+      )
+    }
+  } catch (error) {
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.relayRepairFailed', { error: error?.message || error })
+    )
+  } finally {
+    isRepairingRelay.value = false
+  }
+}
+
 const normalizeGatewayProfile = (profile) => {
   const data = toCamel(profile)
   return {
@@ -1064,6 +1335,7 @@ const loadAccessConfig = async () => {
   const data = toCamel(raw)
   accessConfig.value = {
     serverUrl: data.serverUrl || `http://127.0.0.1:${SHARED_PORT}/v1`,
+    publicBaseUrl: data.publicBaseUrl || '',
     apiKey: data.apiKey || ''
   }
 }
@@ -1385,7 +1657,7 @@ const resetGatewayProfileToTeamDefaults = async (profile) => {
 const copyGatewayAccess = async (profile) => {
   const payload = [
     `# ${buildProfileDisplayLabel(profile)}`,
-    `OPENAI_BASE_URL=${publicServerUrl}`,
+    `OPENAI_BASE_URL=${publicServerUrl.value}`,
     `OPENAI_API_KEY=${profile.apiKey}`,
     '# Local fallback:',
     `# OPENAI_BASE_URL=${accessConfig.value.serverUrl}`
@@ -1395,7 +1667,7 @@ const copyGatewayAccess = async (profile) => {
 
 const copyAllGatewayAccess = async () => {
   const payload = buildAllMembersAccessBundle({
-    baseUrl: publicServerUrl,
+    baseUrl: publicServerUrl.value,
     profiles: memberTableRows.value
   })
   await copyText(payload)
@@ -1619,6 +1891,9 @@ const nextLogPage = async () => {
 
 onMounted(async () => {
   await refreshAllData({ refreshGatewayProfiles: true })
+  unlistenRelayHealth = await listen('codex-relay-health-changed', (event) => {
+    relayHealth.value = normalizeRelayHealth(event.payload)
+  })
   pollTimer = window.setInterval(() => {
     refreshAllData()
   }, 1000)
@@ -1632,6 +1907,10 @@ onBeforeUnmount(() => {
   if (modelFilterTimer) {
     clearTimeout(modelFilterTimer)
     modelFilterTimer = null
+  }
+  if (typeof unlistenRelayHealth === 'function') {
+    unlistenRelayHealth()
+    unlistenRelayHealth = null
   }
 })
 
@@ -1664,7 +1943,7 @@ const toggleServer = async () => {
 const refreshAllData = async ({ refreshPool = false, refreshGatewayProfiles = false } = {}) => {
   isLoading.value = true
   try {
-    const topLevelTasks = [loadServerStatus(), loadAccessConfig()]
+    const topLevelTasks = [loadServerStatus(), loadAccessConfig(), loadRelayHealth()]
     if (refreshGatewayProfiles) {
       topLevelTasks.push(loadGatewayProfiles())
     }
@@ -1695,6 +1974,7 @@ const manualRefresh = async () => {
     // 忽略 flush 错误
   }
   await refreshAllData({ refreshPool: true, refreshGatewayProfiles: true })
+  await refreshRelayHealth()
   await loadMemberAnalytics({ force: true })
 }
 </script>
