@@ -15,12 +15,18 @@ const RELAY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const CODEX_RELAY_HEALTH_CHANGED_EVENT: &str = "codex-relay-health-changed";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CodexRelayProbeFailure {
+pub(crate) enum CodexRelayProbeFailure {
     HttpStatus(u16),
     Timeout,
     InvalidJson,
     EmptyModelList,
     Transport(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexRelayProbeOutcome {
+    pub(crate) health: CodexRelayLayerHealth,
+    pub(crate) failure: Option<CodexRelayProbeFailure>,
 }
 
 impl std::fmt::Display for CodexRelayProbeFailure {
@@ -96,13 +102,32 @@ fn build_probe_layer_health(
     next
 }
 
+fn format_probe_failure(label: &str, err: &CodexRelayProbeFailure) -> String {
+    format!("{} {}", label, err)
+}
+
+fn build_probe_outcome(
+    label: &str,
+    previous: &CodexRelayLayerHealth,
+    checked_at: i64,
+    result: Result<(), CodexRelayProbeFailure>,
+) -> CodexRelayProbeOutcome {
+    let failure = result.as_ref().err().cloned();
+    let mut health = build_probe_layer_health(previous, checked_at, result);
+
+    if let Some(err) = failure.as_ref() {
+        health.last_error = Some(format_probe_failure(label, err));
+    }
+
+    CodexRelayProbeOutcome { health, failure }
+}
+
 fn build_skipped_layer_health(
     previous: &CodexRelayLayerHealth,
     reason: impl Into<String>,
 ) -> CodexRelayLayerHealth {
     let mut next = previous.clone();
     next.healthy = false;
-    next.last_checked_at = None;
     next.last_error = Some(reason.into());
     next
 }
@@ -136,12 +161,10 @@ async fn probe_relay_layer(
     api_key: &str,
     previous: &CodexRelayLayerHealth,
     checked_at: i64,
-) -> CodexRelayLayerHealth {
-    let result = run_models_probe(client, base_url, api_key)
-        .await
-        .map_err(|err| CodexRelayProbeFailure::Transport(format!("{} {}", label, err)));
+) -> CodexRelayProbeOutcome {
+    let result = run_models_probe(client, base_url, api_key).await;
 
-    build_probe_layer_health(previous, checked_at, result)
+    build_probe_outcome(label, previous, checked_at, result)
 }
 
 pub(crate) async fn probe_local_relay(
@@ -150,7 +173,7 @@ pub(crate) async fn probe_local_relay(
     api_key: &str,
     previous: &CodexRelayLayerHealth,
     checked_at: i64,
-) -> CodexRelayLayerHealth {
+) -> CodexRelayProbeOutcome {
     probe_relay_layer(
         client,
         "local relay",
@@ -168,7 +191,7 @@ pub(crate) async fn probe_public_relay(
     api_key: &str,
     previous: &CodexRelayLayerHealth,
     checked_at: i64,
-) -> CodexRelayLayerHealth {
+) -> CodexRelayProbeOutcome {
     probe_relay_layer(
         client,
         "public relay",
@@ -259,7 +282,7 @@ pub(crate) async fn refresh_codex_relay_health_snapshot(
     let client = reqwest::Client::new();
     let local_base_url = gateway_server_url(current_api_server_port(state));
 
-    let local = probe_local_relay(
+    let local_probe = probe_local_relay(
         &client,
         &local_base_url,
         &api_key,
@@ -267,7 +290,7 @@ pub(crate) async fn refresh_codex_relay_health_snapshot(
         checked_at,
     )
     .await;
-    let public = if local.healthy {
+    let public = if local_probe.failure.is_none() {
         probe_public_relay(
             &client,
             &config.relay.public_base_url,
@@ -276,6 +299,7 @@ pub(crate) async fn refresh_codex_relay_health_snapshot(
             checked_at,
         )
         .await
+        .health
     } else {
         build_skipped_layer_health(
             &previous.public,
@@ -284,7 +308,7 @@ pub(crate) async fn refresh_codex_relay_health_snapshot(
     };
 
     let mut snapshot = previous;
-    snapshot.local = local;
+    snapshot.local = local_probe.health;
     snapshot.public = public;
     snapshot.refresh_overall();
     store_codex_relay_health_snapshot(state, snapshot)
@@ -320,6 +344,44 @@ mod tests {
             )
             .last_error
             .is_some()
+        );
+    }
+
+    #[test]
+    fn codex_relay_probe_outcome_preserves_typed_failures() {
+        let outcome = build_probe_outcome(
+            "public relay",
+            &CodexRelayLayerHealth::default(),
+            123,
+            Err(CodexRelayProbeFailure::HttpStatus(502)),
+        );
+
+        assert_eq!(
+            outcome.failure,
+            Some(CodexRelayProbeFailure::HttpStatus(502))
+        );
+        assert_eq!(
+            outcome.health.last_error.as_deref(),
+            Some("public relay returned HTTP 502")
+        );
+    }
+
+    #[test]
+    fn codex_relay_probe_skipped_layer_preserves_last_checked_history() {
+        let previous = CodexRelayLayerHealth {
+            last_checked_at: Some(77),
+            last_success_at: Some(55),
+            last_error: Some("old error".into()),
+            ..Default::default()
+        };
+
+        let next = build_skipped_layer_health(&previous, "public relay probe skipped");
+
+        assert_eq!(next.last_checked_at, Some(77));
+        assert_eq!(next.last_success_at, Some(55));
+        assert_eq!(
+            next.last_error.as_deref(),
+            Some("public relay probe skipped")
         );
     }
 
