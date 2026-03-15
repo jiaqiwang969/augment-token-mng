@@ -272,37 +272,6 @@ fn team_profile_preset_for_member_code(member_code: Option<&str>) -> Option<Team
     })
 }
 
-fn canonical_builtin_team_profile_id(
-    profiles: &GatewayAccessProfiles,
-    member_code: Option<&str>,
-) -> Option<String> {
-    let normalized = member_code.and_then(normalize_member_code)?;
-    if team_profile_preset_for_member_code(Some(normalized.as_str())).is_none() {
-        return None;
-    }
-
-    profiles
-        .list_by_target(GatewayTarget::Codex)
-        .into_iter()
-        .find(|profile| {
-            profile
-                .member_code
-                .as_deref()
-                .and_then(normalize_member_code)
-                .as_deref()
-                == Some(normalized.as_str())
-        })
-        .map(|profile| profile.id)
-}
-
-fn profile_is_builtin_team_member(
-    profiles: &GatewayAccessProfiles,
-    profile: &GatewayAccessProfile,
-) -> bool {
-    canonical_builtin_team_profile_id(profiles, profile.member_code.as_deref()).as_deref()
-        == Some(profile.id.as_str())
-}
-
 fn generate_gateway_api_key_for_member_code(member_code: Option<&str>) -> String {
     match member_code.and_then(normalize_member_code) {
         Some(member_code) => generate_team_gateway_api_key(&member_code),
@@ -458,25 +427,13 @@ fn update_codex_gateway_profile_in_profiles(
     mutation: CodexGatewayProfileMutation,
 ) -> Result<GatewayAccessProfile, String> {
     let mut existing = codex_gateway_profile_by_id(profiles, profile_id)?;
-    let builtin_preset = if profile_is_builtin_team_member(profiles, &existing) {
-        team_profile_preset_for_member_code(existing.member_code.as_deref())
-    } else {
-        None
-    };
     let current_member_code = existing
         .member_code
         .as_deref()
         .and_then(normalize_member_code);
 
     if let Some(name_input) = mutation.name {
-        if let Some(preset) = builtin_preset {
-            let trimmed = name_input.trim();
-            if !trimmed.is_empty() && trimmed != preset.name {
-                return Err(
-                    "Built-in team member name is fixed; use reset to restore defaults".to_string(),
-                );
-            }
-        } else if let Some(name) = normalize_gateway_profile_name(Some(name_input)) {
+        if let Some(name) = normalize_gateway_profile_name(Some(name_input)) {
             existing.name = name;
         }
     }
@@ -492,16 +449,6 @@ fn update_codex_gateway_profile_in_profiles(
 
     if let Some(member_code_input) = mutation.member_code {
         let normalized_member_code = normalize_gateway_member_code(Some(member_code_input));
-        if let Some(preset) = builtin_preset {
-            let preset_member_code = normalize_member_code(preset.member_code)
-                .unwrap_or_else(|| preset.member_code.to_string());
-            if normalized_member_code.as_deref() != Some(preset_member_code.as_str()) {
-                return Err(
-                    "Built-in team member code is fixed; create a custom profile instead"
-                        .to_string(),
-                );
-            }
-        }
         if normalized_member_code != current_member_code {
             ensure_unique_codex_member_code(
                 profiles,
@@ -575,10 +522,7 @@ fn delete_codex_gateway_profile_in_profiles(
     profiles: &mut GatewayAccessProfiles,
     profile_id: &str,
 ) -> Result<(), String> {
-    let profile = codex_gateway_profile_by_id(profiles, profile_id)?;
-    if profile_is_builtin_team_member(profiles, &profile) {
-        return Err("Built-in team members cannot be deleted; disable them instead".to_string());
-    }
+    codex_gateway_profile_by_id(profiles, profile_id)?;
 
     if profiles.remove_profile(profile_id) {
         Ok(())
@@ -1802,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_codex_gateway_profile_rejects_builtin_team_member() {
+    fn update_codex_gateway_profile_allows_editing_imported_team_member() {
         let mut profiles = import_codex_team_template_profiles(GatewayAccessProfiles::default());
         let jdd = profiles
             .list_by_target(GatewayTarget::Codex)
@@ -1810,10 +1754,45 @@ mod tests {
             .find(|profile| profile.member_code.as_deref() == Some("jdd"))
             .unwrap();
 
-        let error = delete_codex_gateway_profile_in_profiles(&mut profiles, &jdd.id).unwrap_err();
+        let updated = update_codex_gateway_profile_in_profiles(
+            &mut profiles,
+            &jdd.id,
+            CodexGatewayProfileMutation {
+                name: Some("姜大大 Pro".into()),
+                api_key: None,
+                enabled: Some(false),
+                member_code: Some("mentor".into()),
+                role_title: Some("顾问".into()),
+                persona_summary: Some("转为顾问角色".into()),
+                color: Some("#112233".into()),
+                notes: Some("允许自由编辑".into()),
+            },
+        )
+        .unwrap();
 
-        assert!(error.contains("disable"));
-        assert_eq!(profiles.list_by_target(GatewayTarget::Codex).len(), 10);
+        assert_eq!(updated.name, "姜大大 Pro");
+        assert!(!updated.enabled);
+        assert_eq!(updated.member_code.as_deref(), Some("mentor"));
+        assert_eq!(updated.role_title.as_deref(), Some("顾问"));
+        assert_eq!(updated.persona_summary.as_deref(), Some("转为顾问角色"));
+        assert_eq!(updated.color.as_deref(), Some("#112233"));
+        assert_eq!(updated.notes.as_deref(), Some("允许自由编辑"));
+    }
+
+    #[test]
+    fn delete_codex_gateway_profile_allows_removing_imported_team_member() {
+        let mut profiles = import_codex_team_template_profiles(GatewayAccessProfiles::default());
+        let jdd = profiles
+            .list_by_target(GatewayTarget::Codex)
+            .into_iter()
+            .find(|profile| profile.member_code.as_deref() == Some("jdd"))
+            .unwrap();
+
+        delete_codex_gateway_profile_in_profiles(&mut profiles, &jdd.id).unwrap();
+
+        let codex_profiles = profiles.list_by_target(GatewayTarget::Codex);
+        assert_eq!(codex_profiles.len(), 9);
+        assert!(!codex_profiles.iter().any(|profile| profile.id == jdd.id));
     }
 
     #[test]

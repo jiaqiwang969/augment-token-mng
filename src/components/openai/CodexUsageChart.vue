@@ -190,23 +190,31 @@ const formatSeriesLabel = (series) => {
   return parts[0] ? parts.join(' · ') : series.profileName
 }
 
+const formatLegendLabel = (series) => {
+  const memberCode = String(series?.memberCode || '').trim()
+  const profileName = String(series?.profileName || '').trim()
+  const profileId = String(series?.profileId || '').trim()
+  return memberCode || profileName || profileId
+}
+
 const labels = computed(() => {
   const firstSeries = normalizedSeries.value.find(series => series.stats.length > 0)
   return firstSeries ? firstSeries.stats.map(point => formatLabel(point.date)) : []
 })
 
 const hasChartData = computed(() =>
-  normalizedSeries.value.some(series =>
-    series.stats.some(point => Number(point.requests || 0) > 0 || Number(point.tokens || 0) > 0)
-  )
+  normalizedSeries.value.some(series => series.stats.length > 0)
 )
 
 const buildDataset = (series, index, metric) => {
   const color = series.color || KEY_COLORS[index % KEY_COLORS.length]
   const isRequests = metric === 'requests'
+  const metricLabel = isRequests ? $t('platform.openai.codexDialog.requests') : $t('platform.openai.codexDialog.tokens')
 
   return {
-    label: `${formatSeriesLabel(series)} · ${isRequests ? $t('platform.openai.codexDialog.requests') : $t('platform.openai.codexDialog.tokens')}`,
+    label: `${formatLegendLabel(series)} · ${metricLabel}`,
+    memberLabel: formatSeriesLabel(series),
+    metricLabel,
     data: series.stats.map(point => (isRequests ? point.requests || 0 : point.tokens || 0)),
     yAxisID: isRequests ? 'yRequests' : 'yTokens',
     borderColor: color,
@@ -311,7 +319,12 @@ const chartOptions = computed(() => {
             }
             return ''
           },
-          label: context => `${context.dataset?.label || ''}: ${formatNumber(context.parsed?.y || 0)}`
+          label: context => {
+            const memberLabel = context.dataset?.memberLabel || context.dataset?.label || ''
+            const metricLabel = context.dataset?.metricLabel || ''
+            const prefix = metricLabel ? `${memberLabel} · ${metricLabel}` : memberLabel
+            return `${prefix}: ${formatNumber(context.parsed?.y || 0)}`
+          }
         }
       }
     },

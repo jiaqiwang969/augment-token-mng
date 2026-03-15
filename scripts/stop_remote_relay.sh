@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/load_relay_env.sh"
+load_relay_env
+
 REMOTE_HOST="${ATM_RELAY_HOST:-}"
 REMOTE_PORT="${ATM_RELAY_REMOTE_PORT:-19090}"
 CONTROL_SOCKET="${ATM_RELAY_CONTROL_SOCKET:-$HOME/.ssh/atm-relay-${REMOTE_PORT}.sock}"

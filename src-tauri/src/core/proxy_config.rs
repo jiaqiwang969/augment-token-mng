@@ -4,6 +4,25 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri::Manager;
 
+const DEFAULT_PROXY_REQUEST_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_PROXY_CONNECT_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_COOKIE_CLIENT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_COOKIE_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+fn standard_client_timeouts() -> (Duration, Duration) {
+    (
+        Duration::from_secs(DEFAULT_PROXY_REQUEST_TIMEOUT_SECS),
+        Duration::from_secs(DEFAULT_PROXY_CONNECT_TIMEOUT_SECS),
+    )
+}
+
+fn cookie_client_timeouts() -> (Duration, Duration) {
+    (
+        Duration::from_secs(DEFAULT_COOKIE_CLIENT_TIMEOUT_SECS),
+        Duration::from_secs(DEFAULT_COOKIE_CONNECT_TIMEOUT_SECS),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyType {
@@ -84,9 +103,10 @@ impl ProxyConfig {
 
     /// 创建配置了代理的 reqwest 客户端
     pub fn create_client(&self) -> Result<reqwest::Client, String> {
+        let (request_timeout, connect_timeout) = standard_client_timeouts();
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(15));
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout);
 
         if self.enabled {
             match self.proxy_type {
@@ -121,9 +141,10 @@ impl ProxyConfig {
         &self,
         jar: std::sync::Arc<reqwest::cookie::Jar>,
     ) -> Result<reqwest::Client, String> {
+        let (request_timeout, connect_timeout) = cookie_client_timeouts();
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
             .cookie_provider(jar)
             .redirect(reqwest::redirect::Policy::limited(10));
 
@@ -418,6 +439,27 @@ pub async fn save_proxy_config(
 #[tauri::command]
 pub async fn load_proxy_config(app: tauri::AppHandle) -> Result<ProxyConfig, String> {
     load_proxy_config_internal(&app).map_err(|e| format!("Failed to load proxy config: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_proxy_client_timeout_is_120_seconds() {
+        let (request_timeout, connect_timeout) = standard_client_timeouts();
+
+        assert_eq!(request_timeout, Duration::from_secs(120));
+        assert_eq!(connect_timeout, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn cookie_proxy_client_timeouts_remain_shorter() {
+        let (request_timeout, connect_timeout) = cookie_client_timeouts();
+
+        assert_eq!(request_timeout, Duration::from_secs(30));
+        assert_eq!(connect_timeout, Duration::from_secs(10));
+    }
 }
 
 #[tauri::command]

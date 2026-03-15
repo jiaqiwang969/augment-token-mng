@@ -1,4 +1,4 @@
-.PHONY: help dev tauri-dev-full frontend-dev cliproxy test relay-start relay-stop relay-check
+.PHONY: help dev tauri-dev-full frontend-dev cliproxy test relay-start relay-stop relay-check deploy deploy-check
 
 help:
 	@printf '%s\n' \
@@ -7,6 +7,8 @@ help:
 		'make frontend-dev    Start Vite only' \
 		'make cliproxy        Rebuild the Go cliproxy sidecar' \
 		'make test            Run the lightweight Node regression tests' \
+		'make deploy          Apply remote nginx relay config, start the tunnel, and verify health' \
+		'make deploy-check    Verify the relay end to end using .env.relay' \
 		'make relay-start     Start the reverse SSH relay' \
 		'make relay-stop      Stop the reverse SSH relay' \
 		'make relay-check     Check local, remote-loopback, and public relay health'
@@ -24,7 +26,13 @@ cliproxy:
 	npm run build:cliproxy
 
 test:
-	node --test tests/tauriBridge.test.js tests/ensureViteDev.test.js
+	node --test tests/tauriBridge.test.js tests/ensureViteDev.test.js tests/relayConfig.test.js
+
+deploy:
+	node scripts/deploy_remote_relay.mjs
+
+deploy-check:
+	./scripts/check_remote_relay.sh
 
 relay-start:
 	./scripts/start_remote_relay.sh

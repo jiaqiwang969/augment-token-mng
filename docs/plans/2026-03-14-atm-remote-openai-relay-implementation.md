@@ -306,7 +306,7 @@ git commit -m "feat(ui): add public sharing and relay controls"
 ### Task 8: Add Ubuntu Deployment Assets
 
 **Files:**
-- Create: `deploy/nginx/public-atm-relay.conf`
+- Create: `deploy/nginx/public-atm-relay.conf.template`
 - Create: `scripts/deploy_remote_relay.sh`
 - Create: `scripts/check_remote_relay.sh`
 - Modify: `Makefile`
@@ -349,7 +349,7 @@ Expected: script exits successfully when nginx and the tunnel target are reachab
 **Step 5: Commit**
 
 ```bash
-git add deploy/nginx/public-atm-relay.conf scripts/deploy_remote_relay.sh scripts/check_remote_relay.sh Makefile
+git add deploy/nginx/public-atm-relay.conf.template scripts/deploy_remote_relay.sh scripts/check_remote_relay.sh Makefile
 git commit -m "ops: add remote relay deployment assets"
 ```
 

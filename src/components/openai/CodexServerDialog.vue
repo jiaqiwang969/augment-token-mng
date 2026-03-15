@@ -41,8 +41,8 @@
 
     <div class="h-[80vh] overflow-hidden">
       <div v-if="activeTab === 'overview'" class="h-full space-y-4 overflow-y-auto p-1 pr-2">
-        <div class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2 rounded-lg border border-border p-3">
+        <div class="grid gap-3 lg:grid-cols-2">
+          <div class="space-y-2 rounded-xl border border-border bg-bg-base/50 p-3">
             <label class="label mb-0">{{ $t('platform.openai.codexDialog.localServerUrl') }}</label>
             <div class="flex gap-2">
               <input class="input font-mono" :value="accessConfig.serverUrl" readonly />
@@ -59,14 +59,12 @@
             </div>
           </div>
 
-          <div class="space-y-2 rounded-lg border border-border p-3">
+          <div class="space-y-2 rounded-xl border border-border bg-bg-base/50 p-3">
+            <label class="label mb-0">{{ $t('platform.openai.codexDialog.publicServerUrl') }}</label>
             <div class="flex gap-2">
-              <div class="w-full">
-                <label class="label mb-0">{{ $t('platform.openai.codexDialog.publicServerUrl') }}</label>
-                <input class="input font-mono" :value="publicServerUrl" readonly />
-              </div>
+              <input class="input font-mono" :value="publicServerUrl" readonly />
               <button
-                class="btn btn--icon btn--ghost !mt-[22px] !h-[34px] !w-[34px] shrink-0"
+                class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
                 v-tooltip="$t('common.copy')"
                 @click="copyText(publicServerUrl)"
               >
@@ -79,352 +77,7 @@
           </div>
         </div>
 
-        <div class="space-y-4 rounded-lg border border-border p-3">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <label class="label mb-0">{{ $t('platform.openai.codexDialog.teamMembersTitle') }}</label>
-              <p class="mt-1 text-[12px] text-text-muted">
-                {{ $t('platform.openai.codexDialog.teamMembersHint') }}
-              </p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <button class="btn btn--secondary btn--sm" :disabled="isImportingTeam" @click="importTeamTemplate">
-                {{ $t('platform.openai.codexDialog.syncTeamTemplate') }}
-              </button>
-              <button class="btn btn--secondary btn--sm" :disabled="teamGatewayProfiles.length === 0" @click="copyAllGatewayAccess">
-                {{ $t('platform.openai.codexDialog.exportAllMembersAccess') }}
-              </button>
-              <button class="btn btn--ghost btn--sm" :disabled="isCreatingProfile" @click="createGatewayProfile">
-                {{ $t('platform.openai.codexDialog.addCustomKey') }}
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-if="teamGatewayProfiles.length === 0"
-            class="rounded-lg border border-dashed border-border bg-muted/10 px-4 py-6 text-center text-[12px] text-text-muted"
-          >
-            <p class="m-0">{{ $t('platform.openai.codexDialog.noTeamMembers') }}</p>
-            <p class="m-0 mt-2">{{ $t('platform.openai.codexDialog.noTeamMembersHint') }}</p>
-          </div>
-
-          <div v-else class="space-y-3">
-            <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-bg-base/40 p-3">
-              <div>
-                <label class="label mb-0">{{ $t('platform.openai.codexDialog.selectedMemberLabel') }}</label>
-                <p class="mt-1 text-[12px] text-text-muted">
-                  {{ $t('platform.openai.codexDialog.selectedMemberHint') }}
-                </p>
-              </div>
-              <FloatingDropdown placement="bottom-end" :offset="4" width="medium">
-                <template #trigger="{ isOpen }">
-                  <button
-                    class="btn btn--secondary btn--sm min-w-[260px] justify-between gap-2"
-                    :class="{ 'btn--light': !isOpen }"
-                    type="button"
-                  >
-                    <span class="truncate text-left">{{ selectedTeamMemberLabel }}</span>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M6 9l6 6 6-6"/>
-                    </svg>
-                  </button>
-                </template>
-                <template #default="{ close }">
-                  <div class="py-1">
-                    <button
-                      v-for="profile in teamMemberCards"
-                      :key="profile.id"
-                      class="dropdown-item flex items-center gap-2 px-3 py-1.5 text-[13px]"
-                      :class="{ 'bg-primary/10': profile.id === selectedTeamMemberId }"
-                      @click="selectTeamMember(profile.id, close)"
-                    >
-                      <span
-                        class="h-2.5 w-2.5 rounded-full"
-                        :style="{ backgroundColor: profile.cardColor || '#4c6ef5' }"
-                      ></span>
-                      <span class="truncate">{{ buildProfileDisplayLabel(profile) }}</span>
-                    </button>
-                  </div>
-                </template>
-              </FloatingDropdown>
-            </div>
-
-            <div class="grid gap-4">
-              <article
-                v-for="profile in selectedTeamMemberCards"
-                :key="profile.id"
-                class="rounded-xl border border-border bg-muted/10 p-4"
-              >
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div class="min-w-0 flex-1">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span
-                        class="h-3 w-3 rounded-full ring-2 ring-white/40"
-                        :style="{ backgroundColor: profile.cardColor || '#4c6ef5' }"
-                      ></span>
-                      <h4 class="text-[14px] font-semibold">{{ profile.name || profile.id }}</h4>
-                      <span class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-medium text-primary">
-                        {{ profile.memberCode || 'custom' }}
-                      </span>
-                      <span
-                        v-if="profile.roleTitle"
-                        class="rounded-full bg-muted/40 px-2 py-0.5 text-[11px] text-text-secondary"
-                      >
-                        {{ profile.roleTitle }}
-                      </span>
-                      <span
-                        v-if="profile.isPrimary"
-                        class="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-medium text-primary"
-                      >
-                        {{ $t('platform.openai.codexDialog.primaryKey') }}
-                      </span>
-                      <span
-                        v-if="!profile.enabled"
-                        class="rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-medium text-danger"
-                      >
-                        {{ $t('platform.openai.codexDialog.disabledKey') }}
-                      </span>
-                    </div>
-                    <p class="mt-2 text-[12px] leading-5 text-text-muted">
-                      {{ profile.personaSummary || $t('platform.openai.codexDialog.noPersonaSummary') }}
-                    </p>
-                  </div>
-                  <label class="flex items-center gap-2 text-[12px] text-text-secondary">
-                    <input
-                      type="checkbox"
-                      class="h-4 w-4"
-                      :checked="profile.enabled"
-                      :disabled="isProfileBusy(profile.id)"
-                      @change="toggleGatewayProfile(profile, $event.target.checked)"
-                    />
-                    <span>{{ profile.enabled ? $t('platform.openai.codexDialog.enabledKey') : $t('platform.openai.codexDialog.disabledKey') }}</span>
-                  </label>
-                </div>
-
-                <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                  <div class="rounded-lg border border-border/70 bg-bg-base/60 p-3">
-                    <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.todayRequests') }}</div>
-                    <div class="mt-1 text-[16px] font-semibold">{{ formatNumber(profile.todayRequests) }}</div>
-                  </div>
-                  <div class="rounded-lg border border-border/70 bg-bg-base/60 p-3">
-                    <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.todayTokens') }}</div>
-                    <div class="mt-1 text-[16px] font-semibold">{{ formatTokens(profile.todayTokens) }}</div>
-                  </div>
-                  <div class="rounded-lg border border-border/70 bg-bg-base/60 p-3">
-                    <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.successRate') }}</div>
-                    <div class="mt-1 text-[16px] font-semibold">{{ formatPercent(profile.successRate) }}</div>
-                  </div>
-                  <div class="rounded-lg border border-border/70 bg-bg-base/60 p-3">
-                    <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.lastActive') }}</div>
-                    <div class="mt-1 text-[13px] font-medium">{{ formatTs(profile.lastActiveTs) }}</div>
-                  </div>
-                </div>
-
-                <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
-                  <div class="space-y-2">
-                    <label class="label mb-0">{{ $t('platform.openai.codexDialog.memberKey') }}</label>
-                    <div class="flex gap-2">
-                      <input
-                        :value="profile.apiKey"
-                        :type="isProfileKeyVisible(profile.id) ? 'text' : 'password'"
-                        class="input font-mono"
-                        readonly
-                      />
-                      <button
-                        class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                        :disabled="isProfileBusy(profile.id)"
-                        v-tooltip="isProfileKeyVisible(profile.id) ? $t('platform.openai.codexDialog.hideApiKey') : $t('platform.openai.codexDialog.showApiKey')"
-                        @click="toggleProfileKeyVisibility(profile.id)"
-                      >
-                        <svg v-if="isProfileKeyVisible(profile.id)" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27z"/>
-                        </svg>
-                        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-                        </svg>
-                      </button>
-                    </div>
-                    <p class="text-[11px] text-text-muted">
-                      {{ $t('platform.openai.codexDialog.keySuffixLabel', { suffix: profile.keySuffix || '-' }) }}
-                    </p>
-                  </div>
-
-                  <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_130px]">
-                    <div class="space-y-2">
-                      <label class="label mb-0">{{ $t('platform.openai.codexDialog.roleTitleLabel') }}</label>
-                      <input
-                        v-model="profile.roleTitle"
-                        class="input"
-                        :disabled="isProfileBusy(profile.id)"
-                        :placeholder="$t('platform.openai.codexDialog.roleTitlePlaceholder')"
-                      />
-                    </div>
-                    <div class="space-y-2">
-                      <label class="label mb-0">{{ $t('platform.openai.codexDialog.colorLabel') }}</label>
-                      <div class="flex gap-2">
-                        <input
-                          v-model="profile.color"
-                          type="color"
-                          class="h-[34px] w-[46px] rounded-md border border-border bg-transparent px-1"
-                          :disabled="isProfileBusy(profile.id)"
-                        />
-                        <input
-                          v-model="profile.color"
-                          class="input font-mono"
-                          :disabled="isProfileBusy(profile.id)"
-                          placeholder="#4c6ef5"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
-                  <div class="space-y-2">
-                    <label class="label mb-0">{{ $t('platform.openai.codexDialog.notesLabel') }}</label>
-                    <textarea
-                      v-model="profile.notes"
-                      class="input min-h-[78px] resize-y"
-                      :disabled="isProfileBusy(profile.id)"
-                      :placeholder="$t('platform.openai.codexDialog.notesPlaceholder')"
-                    ></textarea>
-                  </div>
-                  <div class="flex flex-wrap gap-2 xl:max-w-[180px] xl:flex-col">
-                    <button class="btn btn--secondary btn--sm" :disabled="isProfileBusy(profile.id)" @click="saveGatewayProfile(profile)">
-                      {{ $t('platform.openai.codexDialog.saveMember') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="regenerateGatewayProfileKey(profile)">
-                      {{ $t('platform.openai.codexDialog.generateApiKey') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="copyGatewayAccess(profile)">
-                      {{ $t('platform.openai.codexDialog.copyAccessBundle') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="copyText(profile.apiKey)">
-                      {{ $t('common.copy') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="resetGatewayProfileToTeamDefaults(profile)">
-                      {{ $t('platform.openai.codexDialog.resetTeamDefaults') }}
-                    </button>
-                  </div>
-                </div>
-              </article>
-            </div>
-
-            <div
-              v-if="memberAnalyticsTruncated"
-              class="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[11px] text-warning"
-            >
-              {{ $t('platform.openai.codexDialog.analyticsTruncatedHint', { limit: formatNumber(TEAM_ANALYTICS_LIMIT) }) }}
-            </div>
-          </div>
-
-          <div class="space-y-3 rounded-lg border border-border/70 bg-bg-base/40 p-3">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <label class="label mb-0">{{ $t('platform.openai.codexDialog.customKeysTitle') }}</label>
-                <p class="mt-1 text-[12px] text-text-muted">
-                  {{ $t('platform.openai.codexDialog.customKeysHint') }}
-                </p>
-              </div>
-              <button class="btn btn--secondary btn--sm" :disabled="isCreatingProfile" @click="createGatewayProfile">
-                {{ $t('platform.openai.codexDialog.addCustomKey') }}
-              </button>
-            </div>
-
-            <div
-              v-if="customGatewayProfiles.length === 0"
-              class="rounded-lg border border-dashed border-border bg-muted/10 px-3 py-5 text-center text-[12px] text-text-muted"
-            >
-              {{ $t('platform.openai.codexDialog.noCustomKeys') }}
-            </div>
-
-            <div v-else class="space-y-2">
-              <div
-                v-for="profile in customGatewayProfiles"
-                :key="profile.id"
-                class="space-y-3 rounded-lg border border-border bg-muted/10 p-3"
-              >
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-[13px] font-medium">{{ profile.name || profile.id }}</span>
-                    <span
-                      v-if="profile.isPrimary"
-                      class="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-medium text-primary"
-                    >
-                      {{ $t('platform.openai.codexDialog.primaryKey') }}
-                    </span>
-                    <span
-                      v-if="!profile.enabled"
-                      class="rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-medium text-danger"
-                    >
-                      {{ $t('platform.openai.codexDialog.disabledKey') }}
-                    </span>
-                  </div>
-                  <label class="flex items-center gap-2 text-[12px] text-text-secondary">
-                    <input
-                      type="checkbox"
-                      class="h-4 w-4"
-                      :checked="profile.enabled"
-                      :disabled="isProfileBusy(profile.id)"
-                      @change="toggleGatewayProfile(profile, $event.target.checked)"
-                    />
-                    <span>{{ profile.enabled ? $t('platform.openai.codexDialog.enabledKey') : $t('platform.openai.codexDialog.disabledKey') }}</span>
-                  </label>
-                </div>
-
-                <div class="grid gap-2 xl:grid-cols-[220px_minmax(0,1fr)_auto]">
-                  <input
-                    v-model="profile.name"
-                    class="input"
-                    :disabled="isProfileBusy(profile.id)"
-                    :placeholder="$t('platform.openai.codexDialog.profileNamePlaceholder')"
-                  />
-
-                  <div class="flex gap-2">
-                    <input
-                      v-model="profile.apiKey"
-                      :type="isProfileKeyVisible(profile.id) ? 'text' : 'password'"
-                      class="input font-mono"
-                      :disabled="isProfileBusy(profile.id)"
-                      :placeholder="$t('platform.openai.codexDialog.apiKeyPlaceholder')"
-                    />
-                    <button
-                      class="btn btn--icon btn--ghost !h-[34px] !w-[34px] shrink-0"
-                      :disabled="isProfileBusy(profile.id)"
-                      v-tooltip="isProfileKeyVisible(profile.id) ? $t('platform.openai.codexDialog.hideApiKey') : $t('platform.openai.codexDialog.showApiKey')"
-                      @click="toggleProfileKeyVisibility(profile.id)"
-                    >
-                      <svg v-if="isProfileKeyVisible(profile.id)" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27z"/>
-                      </svg>
-                      <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-                      </svg>
-                    </button>
-                  </div>
-
-                  <div class="flex flex-wrap gap-2">
-                    <button class="btn btn--secondary btn--sm" :disabled="isProfileBusy(profile.id)" @click="saveGatewayProfile(profile)">
-                      {{ $t('platform.openai.codexDialog.saveKey') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="regenerateGatewayProfileKey(profile)">
-                      {{ $t('platform.openai.codexDialog.generateApiKey') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm" :disabled="isProfileBusy(profile.id)" @click="copyGatewayAccess(profile)">
-                      {{ $t('platform.openai.codexDialog.copyAccessBundle') }}
-                    </button>
-                    <button class="btn btn--ghost btn--sm text-danger" :disabled="isProfileBusy(profile.id)" @click="deleteGatewayProfile(profile)">
-                      {{ $t('common.delete') }}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 策略选择器 + 快捷切换 -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid gap-3 lg:grid-cols-2">
           <div class="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2">
             <span class="text-[13px] text-text-secondary">{{ $t('platform.openai.codexDialog.poolStrategy') }}</span>
             <div class="flex items-center gap-2">
@@ -509,136 +162,276 @@
           </div>
         </div>
 
-        <div class="grid gap-4 md:grid-cols-4">
-          <div class="rounded-lg border border-border p-3">
-            <div class="text-[12px] text-text-muted">{{ $t('platform.openai.codexDialog.totalAccounts') }}</div>
-            <div class="text-[18px] font-semibold">{{ poolStatus.totalAccounts }}</div>
-          </div>
-          <div class="rounded-lg border border-border p-3">
+        <div class="grid gap-3 sm:grid-cols-3">
+          <div class="rounded-xl border border-border bg-bg-base/50 p-3">
             <div class="text-[12px] text-text-muted">{{ $t('platform.openai.codexDialog.enabledMembers') }}</div>
-            <div class="text-[18px] font-semibold">{{ formatNumber(teamSummaryCards.enabledMembers) }}</div>
+            <div class="mt-1 text-[18px] font-semibold">{{ formatNumber(teamSummaryCards.enabledMembers) }}</div>
           </div>
-          <div class="rounded-lg border border-border p-3">
+          <div class="rounded-xl border border-border bg-bg-base/50 p-3">
             <div class="text-[12px] text-text-muted">{{ $t('platform.openai.codexDialog.todayRequests') }}</div>
-            <div class="text-[18px] font-semibold">{{ formatNumber(teamSummaryCards.todayRequests) }}</div>
+            <div class="mt-1 text-[18px] font-semibold">{{ formatNumber(teamSummaryCards.todayRequests) }}</div>
           </div>
-          <div class="rounded-lg border border-border p-3">
+          <div class="rounded-xl border border-border bg-bg-base/50 p-3">
             <div class="text-[12px] text-text-muted">{{ $t('platform.openai.codexDialog.todayTokens') }}</div>
-            <div class="text-[18px] font-semibold">{{ formatTokens(teamSummaryCards.todayTokens) }}</div>
+            <div class="mt-1 text-[18px] font-semibold">{{ formatTokens(teamSummaryCards.todayTokens) }}</div>
           </div>
         </div>
 
-        <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-bg-base/40 p-3">
-          <div>
-            <label class="label mb-0">{{ $t('platform.openai.codexDialog.visibleMembersLabel') }}</label>
-            <p class="mt-1 text-[12px] text-text-muted">
-              {{ $t('platform.openai.codexDialog.visibleMembersHint') }}
-            </p>
-          </div>
-          <FloatingDropdown placement="bottom-end" :offset="4" width="medium" :close-on-select="false">
-            <template #trigger="{ isOpen }">
-              <button
-                class="btn btn--secondary btn--sm min-w-[260px] justify-between gap-2"
-                :class="{ 'btn--light': !isOpen }"
-                type="button"
-              >
-                <span class="truncate text-left">{{ analyticsVisibleMembersLabel }}</span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M6 9l6 6 6-6"/>
-                </svg>
+        <section class="space-y-4 rounded-2xl border border-border bg-bg-base/40 p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <label class="label mb-0">{{ $t('platform.openai.codexDialog.teamMembersTitle') }}</label>
+              <p class="mt-1 text-[12px] text-text-muted">
+                {{ $t('platform.openai.codexDialog.teamMembersHint') }}
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button class="btn btn--primary btn--sm" :disabled="isCreatingProfile" @click="openCreateMemberEditor">
+                {{ $t('platform.openai.codexDialog.addMember') }}
               </button>
-            </template>
-            <template #default>
-              <div class="py-1">
-                <button
-                  class="dropdown-item flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]"
-                  @click="showAllAnalyticsMembers"
-                >
-                  <span>{{ $t('platform.openai.codexDialog.allVisibleMembers') }}</span>
-                  <span class="text-primary">{{ visibleAnalyticsMemberCodes.length === analyticsMemberOptions.length ? '✓' : '' }}</span>
-                </button>
-                <button
-                  v-for="member in analyticsMemberOptions"
-                  :key="member.value"
-                  class="dropdown-item flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]"
-                  @click="toggleAnalyticsMemberVisibility(member.value)"
-                >
-                  <span class="flex min-w-0 items-center gap-2">
-                    <span
-                      class="h-2.5 w-2.5 rounded-full"
-                      :style="{ backgroundColor: member.color || '#4c6ef5' }"
-                    ></span>
-                    <span class="truncate">{{ member.label }}</span>
-                  </span>
-                  <span class="text-primary">{{ isAnalyticsMemberVisible(member.value) ? '✓' : '' }}</span>
-                </button>
-              </div>
-            </template>
-          </FloatingDropdown>
-        </div>
-
-        <div class="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.9fr)]">
-          <CodexUsageChart :loading="isLoadingChart" :chart-data="filteredDailyStatsSeries" />
-
-          <div class="flex h-[320px] flex-col rounded-lg border border-border bg-muted/10 p-3">
-            <div class="mb-3 flex items-center justify-between gap-2">
-              <div>
-                <h4 class="m-0 text-[13px] font-semibold text-text-secondary">
-                  {{ $t('platform.openai.codexDialog.memberRankingTitle') }}
-                </h4>
-                <p class="m-0 mt-1 text-[11px] text-text-muted">
-                  {{ $t('platform.openai.codexDialog.memberRankingHint') }}
-                </p>
-              </div>
-              <span v-if="isLoadingMemberAnalytics" class="spinner spinner--sm"></span>
+              <button class="btn btn--secondary btn--sm" :disabled="isImportingTeam" @click="importTeamTemplate">
+                {{ $t('platform.openai.codexDialog.syncTeamTemplate') }}
+              </button>
+              <button class="btn btn--secondary btn--sm" :disabled="memberTableRows.length === 0" @click="copyAllGatewayAccess">
+                {{ $t('platform.openai.codexDialog.exportAllMembersAccess') }}
+              </button>
             </div>
+          </div>
 
+          <div
+            v-if="memberTableRows.length === 0"
+            class="rounded-xl border border-dashed border-border bg-muted/10 px-4 py-8 text-center text-[12px] text-text-muted"
+          >
+            <p class="m-0">{{ $t('platform.openai.codexDialog.noTeamMembers') }}</p>
+            <p class="m-0 mt-2">{{ $t('platform.openai.codexDialog.noTeamMembersHint') }}</p>
+          </div>
+
+          <template v-else>
             <div
-              v-if="filteredMemberRankingRows.length === 0"
-              class="flex flex-1 items-center justify-center text-[12px] text-text-muted"
+              v-if="memberAnalyticsTruncated"
+              class="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[11px] text-warning"
             >
-              {{ $t('platform.openai.codexDialog.noMemberRankingData') }}
+              {{ $t('platform.openai.codexDialog.analyticsTruncatedHint', { limit: formatNumber(TEAM_ANALYTICS_LIMIT) }) }}
             </div>
 
-            <div v-else class="min-h-0 flex-1 overflow-y-auto">
-              <table class="table table-fixed">
-                <thead class="sticky top-0 z-10 bg-bg-base rounded-t-lg overflow-hidden">
-                  <tr>
-                    <th class="w-[34%] first:rounded-tl-lg">{{ $t('platform.openai.codexDialog.member') }}</th>
-                    <th class="w-[12%] text-right">{{ $t('platform.openai.codexDialog.requests') }}</th>
-                    <th class="w-[16%] text-right">{{ $t('platform.openai.codexDialog.tokens') }}</th>
-                    <th class="w-[14%] text-right">{{ $t('platform.openai.codexDialog.successRate') }}</th>
-                    <th class="w-[12%] text-right">{{ $t('platform.openai.codexDialog.avgDuration') }}</th>
-                    <th class="w-[12%] last:rounded-tr-lg text-right">{{ $t('platform.openai.codexDialog.lastActive') }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="profile in filteredMemberRankingRows" :key="profile.id">
-                    <td>
-                      <div class="flex items-start gap-2">
+            <div class="rounded-xl border border-border bg-muted/10 p-3">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 class="m-0 text-[13px] font-semibold text-text-secondary">
+                    {{ $t('platform.openai.codexDialog.monthlyTrend') }}
+                  </h4>
+                  <p class="m-0 mt-1 text-[11px] text-text-muted">
+                    {{ $t('platform.openai.codexDialog.monthlyTrendHint') }}
+                  </p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="rounded-full bg-primary/10 px-3 py-1 text-[11px] font-medium text-primary">
+                    {{ memberSelectionLabel }}
+                  </span>
+                  <button
+                    v-if="memberTableRows.length > 0"
+                    class="btn btn--ghost btn--sm"
+                    :disabled="allMembersSelected"
+                    @click="selectAllMembers"
+                  >
+                    {{ $t('platform.openai.codexDialog.selectAllMembers') }}
+                  </button>
+                  <button
+                    v-if="memberTableRows.length > 0"
+                    class="btn btn--ghost btn--sm"
+                    :disabled="selectedMemberCount === 0"
+                    @click="clearMemberSelection"
+                  >
+                    {{ $t('platform.openai.codexDialog.clearSelection') }}
+                  </button>
+                </div>
+              </div>
+              <div class="mt-3">
+                <CodexUsageChart :loading="isLoadingChart" :chart-data="filteredDailyStatsSeries" />
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-border bg-muted/10">
+              <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 px-3 py-3">
+                <div>
+                  <h4 class="m-0 text-[13px] font-semibold text-text-secondary">
+                    {{ $t('platform.openai.codexDialog.memberTableTitle') }}
+                  </h4>
+                  <p class="m-0 mt-1 text-[11px] text-text-muted">
+                    {{ $t('platform.openai.codexDialog.memberTableHint') }}
+                  </p>
+                </div>
+                <span v-if="isLoadingMemberAnalytics" class="spinner spinner--sm"></span>
+              </div>
+
+              <div class="max-h-[420px] overflow-auto">
+                <table class="table table-fixed">
+                  <thead class="sticky top-0 z-10 overflow-hidden rounded-t-lg bg-bg-base">
+                    <tr>
+                      <th class="w-[6%] first:rounded-tl-lg text-center">#</th>
+                      <th class="w-[24%]">{{ $t('platform.openai.codexDialog.member') }}</th>
+                      <th class="w-[10%]">{{ $t('platform.openai.codexDialog.memberCodeLabel') }}</th>
+                      <th class="w-[14%]">{{ $t('platform.openai.codexDialog.roleTitleLabel') }}</th>
+                      <th class="w-[9%]">{{ $t('platform.openai.codexDialog.status') }}</th>
+                      <th class="w-[9%] text-right">{{ $t('platform.openai.codexDialog.todayRequests') }}</th>
+                      <th class="w-[11%] text-right">{{ $t('platform.openai.codexDialog.thirtyDayTokens') }}</th>
+                      <th class="w-[9%]">{{ $t('platform.openai.codexDialog.lastActive') }}</th>
+                      <th class="w-[8%] last:rounded-tr-lg text-right">{{ $t('platform.openai.codexDialog.actions') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="profile in memberTableRows"
+                      :key="profile.id"
+                      :class="{
+                        'bg-primary/8': profile.id === focusedMemberProfileId,
+                        'bg-primary/4': profile.id !== focusedMemberProfileId && isMemberSelected(profile.id)
+                      }"
+                      @click="setFocusedMember(profile.id)"
+                    >
+                      <td class="text-center">
+                        <input
+                          type="checkbox"
+                          class="h-4 w-4 accent-accent"
+                          :checked="isMemberSelected(profile.id)"
+                          @click.stop="toggleMemberSelection(profile.id)"
+                        />
+                      </td>
+                      <td>
+                        <div class="flex items-start gap-2">
+                          <span
+                            class="mt-1 h-2.5 w-2.5 rounded-full"
+                            :style="{ backgroundColor: profile.rowColor || '#4c6ef5' }"
+                          ></span>
+                          <div class="min-w-0">
+                            <div class="truncate text-[12px] font-medium">{{ profile.name || profile.id }}</div>
+                            <div class="mt-0.5 truncate text-[11px] text-text-muted">
+                              {{ profile.personaSummary || profile.displayLabel }}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="font-mono text-[11px]">{{ profile.memberCode || '-' }}</td>
+                      <td class="truncate text-[11px]">{{ profile.roleTitle || '-' }}</td>
+                      <td>
+                        <span :class="['badge badge--sm', profile.enabled ? 'badge--success-tech' : 'badge--danger-tech']">
+                          {{ profile.enabled ? $t('platform.openai.codexDialog.enabledKey') : $t('platform.openai.codexDialog.disabledKey') }}
+                        </span>
+                      </td>
+                      <td class="text-right text-[11px]">{{ formatNumber(profile.todayRequests) }}</td>
+                      <td class="text-right text-[11px]">{{ formatTokens(profile.totalTokens) }}</td>
+                      <td class="text-[11px]">{{ formatTs(profile.lastActiveTs) }}</td>
+                      <td class="text-right">
+                        <div class="flex justify-end gap-2">
+                          <button class="btn btn--ghost btn--sm" @click.stop="copyGatewayAccess(profile)">
+                            {{ $t('common.copy') }}
+                          </button>
+                          <button class="btn btn--ghost btn--sm" @click.stop="openEditMemberEditor(profile)">
+                            {{ $t('common.edit') }}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div v-if="focusedMemberRow" class="rounded-xl border border-border bg-muted/10 p-4">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h4 class="m-0 text-[13px] font-semibold text-text-secondary">
+                    {{ $t('platform.openai.codexDialog.selectedMemberLabel') }}
+                  </h4>
+                  <p class="m-0 mt-1 text-[11px] text-text-muted">
+                    {{ $t('platform.openai.codexDialog.selectedMemberHint') }}
+                  </p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span
+                    class="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary"
+                  >
+                    {{ focusedMemberRow.displayLabel }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="mt-4 space-y-4">
+                <div class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+                  <div class="rounded-2xl border border-border bg-bg-base/70 p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="flex min-w-0 items-start gap-3">
                         <span
-                          class="mt-1 h-2.5 w-2.5 rounded-full"
-                          :style="{ backgroundColor: profile.cardColor || '#4c6ef5' }"
+                          class="mt-1 h-3 w-3 shrink-0 rounded-full"
+                          :style="{ backgroundColor: focusedMemberRow.rowColor || '#4c6ef5' }"
                         ></span>
                         <div class="min-w-0">
-                          <div class="truncate text-[12px] font-medium">{{ buildProfileDisplayLabel(profile) }}</div>
-                          <div class="mt-0.5 text-[11px] text-text-muted">
-                            {{ $t('platform.openai.codexDialog.keySuffixLabel', { suffix: profile.keySuffix || '-' }) }}
+                          <div class="truncate text-[16px] font-semibold text-text-primary">
+                            {{ focusedMemberRow.name || focusedMemberRow.id }}
+                          </div>
+                          <div class="mt-1 flex flex-wrap gap-2 text-[11px] text-text-muted">
+                            <span class="rounded-full bg-muted/60 px-2 py-1 font-mono">{{ focusedMemberRow.memberCode || '-' }}</span>
+                            <span class="rounded-full bg-muted/60 px-2 py-1">{{ focusedMemberRow.roleTitle || '-' }}</span>
                           </div>
                         </div>
                       </div>
-                    </td>
-                    <td class="text-right text-[11px]">{{ formatNumber(profile.totalRequests) }}</td>
-                    <td class="text-right text-[11px]">{{ formatTokens(profile.totalTokens) }}</td>
-                    <td class="text-right text-[11px]">{{ formatPercent(profile.successRate) }}</td>
-                    <td class="text-right text-[11px]">{{ formatDuration(profile.averageDurationMs) }}</td>
-                    <td class="text-right text-[11px]">{{ formatTs(profile.lastActiveTs) }}</td>
-                  </tr>
-                </tbody>
-              </table>
+                      <span :class="['badge badge--sm', focusedMemberRow.enabled ? 'badge--success-tech' : 'badge--danger-tech']">
+                        {{ focusedMemberRow.enabled ? $t('platform.openai.codexDialog.enabledKey') : $t('platform.openai.codexDialog.disabledKey') }}
+                      </span>
+                    </div>
+                    <p class="m-0 mt-4 text-[13px] leading-6 text-text-secondary">
+                      {{ focusedMemberRow.personaSummary || $t('platform.openai.codexDialog.noPersonaSummary') }}
+                    </p>
+                    <p
+                      v-if="focusedMemberRow.notes"
+                      class="m-0 mt-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-[11px] leading-5 text-text-muted"
+                    >
+                      {{ focusedMemberRow.notes }}
+                    </p>
+                  </div>
+
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.todayRequests') }}</div>
+                      <div class="mt-2 text-[18px] font-semibold">{{ formatNumber(focusedMemberRow.todayRequests) }}</div>
+                    </div>
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.todayTokens') }}</div>
+                      <div class="mt-2 text-[18px] font-semibold">{{ formatTokens(focusedMemberRow.todayTokens) }}</div>
+                    </div>
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.thirtyDayTokens') }}</div>
+                      <div class="mt-2 text-[18px] font-semibold">{{ formatTokens(focusedMemberRow.totalTokens) }}</div>
+                    </div>
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.successRate') }}</div>
+                      <div class="mt-2 text-[18px] font-semibold">{{ formatPercent(focusedMemberRow.successRate) }}</div>
+                    </div>
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.avgDuration') }}</div>
+                      <div class="mt-2 text-[16px] font-semibold">
+                        {{ focusedMemberRow.averageDurationMs ? formatDuration(focusedMemberRow.averageDurationMs) : '-' }}
+                      </div>
+                    </div>
+                    <div class="rounded-2xl border border-border bg-bg-base/70 p-3">
+                      <div class="text-[11px] text-text-muted">{{ $t('platform.openai.codexDialog.lastActive') }}</div>
+                      <div class="mt-2 text-[13px] font-semibold">{{ formatTs(focusedMemberRow.lastActiveTs) }}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap justify-end gap-2">
+                  <button class="btn btn--ghost btn--sm" @click="copyGatewayAccess(focusedMemberRow)">
+                    {{ $t('common.copy') }}
+                  </button>
+                  <button class="btn btn--ghost btn--sm" @click="openEditMemberEditor(focusedMemberRow)">
+                    {{ $t('common.edit') }}
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </template>
+        </section>
       </div>
 
       <div v-else class="flex h-full flex-col gap-2 p-1">
@@ -847,6 +640,22 @@
       </div>
     </div>
 
+    <CodexTeamMemberEditorModal
+      v-if="memberEditorState.visible"
+      :mode="memberEditorState.mode"
+      :member="memberEditorState.profile"
+      :busy="isMemberEditorBusy"
+      :resettable="isResettableTeamMember(memberEditorState.profile)"
+      :public-base-url="publicServerUrl"
+      :local-base-url="accessConfig.serverUrl"
+      @close="closeMemberEditor"
+      @save="saveMemberEditor"
+      @copy-access="copyGatewayAccess"
+      @regenerate="regenerateGatewayProfileKey"
+      @reset-defaults="resetGatewayProfileToTeamDefaults"
+      @delete="deleteGatewayProfile"
+    />
+
     <!-- 快捷切换 Modal -->
     <CodexQuickSwitchModal
       v-if="showQuickSwitchModal"
@@ -865,12 +674,15 @@ import { invoke } from '@tauri-apps/api/core'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '@/components/common/BaseModal.vue'
 import FloatingDropdown from '@/components/common/FloatingDropdown.vue'
+import CodexTeamMemberEditorModal from '@/components/openai/CodexTeamMemberEditorModal.vue'
 import CodexUsageChart from '@/components/openai/CodexUsageChart.vue'
 import CodexQuickSwitchModal from '@/components/openai/CodexQuickSwitchModal.vue'
 import {
   buildAllMembersAccessBundle,
-  filterMemberRankingByVisibleMembers,
-  filterTeamSeriesByVisibleMembers
+  buildSelectedProfileSeries,
+  buildTeamMemberRows,
+  resolveFocusedProfileId,
+  syncSelectedProfileIds
 } from '@/utils/codexTeamUi.js'
 
 defineEmits(['close'])
@@ -907,7 +719,6 @@ const poolStatus = ref({
 })
 const gatewayProfiles = ref([])
 const profileBusyState = ref({})
-const visibleProfileKeys = ref({})
 const isImportingTeam = ref(false)
 const poolStrategy = ref('round-robin')
 const selectedAccountId = ref('')
@@ -916,8 +727,13 @@ const availableAccounts = ref([])
 const memberAnalytics = ref([])
 const isLoadingMemberAnalytics = ref(false)
 const memberAnalyticsTruncated = ref(false)
-const selectedTeamMemberId = ref('')
-const visibleAnalyticsMemberCodes = ref([])
+const selectedMemberProfileIds = ref([])
+const focusedMemberProfileId = ref('')
+const memberEditorState = ref({
+  visible: false,
+  mode: 'create',
+  profile: null
+})
 let lastMemberAnalyticsLoadedAt = 0
 const primaryGatewayApiKey = computed(() => {
   const primary = gatewayProfiles.value.find(profile => profile.isPrimary)
@@ -926,90 +742,57 @@ const primaryGatewayApiKey = computed(() => {
 const memberAnalyticsByProfileId = computed(() =>
   new Map(memberAnalytics.value.map(entry => [entry.profileId, entry]))
 )
-const teamGatewayProfiles = computed(() =>
-  gatewayProfiles.value.filter(isBuiltinTeamProfile).slice().sort(sortProfilesForDisplay)
-)
-const customGatewayProfiles = computed(() =>
-  gatewayProfiles.value.filter(profile => !isBuiltinTeamProfile(profile)).slice().sort(sortProfilesForDisplay)
-)
-const teamMemberCards = computed(() =>
-  teamGatewayProfiles.value.map((profile) => {
-    const analytics = memberAnalyticsByProfileId.value.get(profile.id) || null
-    return {
-      ...profile,
-      displayLabel: buildProfileDisplayLabel(profile),
-      keySuffix: extractKeySuffix(profile.apiKey),
-      todayRequests: analytics?.todayRequests || 0,
-      todayTokens: analytics?.todayTokens || 0,
-      totalRequests: analytics?.requests || 0,
-      totalTokens: analytics?.totalTokens || 0,
-      successRate: analytics?.successRate || 0,
-      averageDurationMs: analytics?.averageDurationMs ?? null,
-      lastActiveTs: analytics?.lastActiveTs || null,
-      cardColor: profile.color || analytics?.color || '#4c6ef5'
-    }
+const memberTableRows = computed(() =>
+  buildTeamMemberRows({
+    profiles: gatewayProfiles.value,
+    analyticsByProfileId: memberAnalyticsByProfileId.value,
+    teamMemberOrder: TEAM_MEMBER_ORDER
   })
 )
-const selectedTeamMemberCard = computed(() =>
-  teamMemberCards.value.find(profile => profile.id === selectedTeamMemberId.value) || teamMemberCards.value[0] || null
-)
-const selectedTeamMemberCards = computed(() =>
-  selectedTeamMemberCard.value ? [selectedTeamMemberCard.value] : []
-)
-const memberRankingRows = computed(() =>
-  teamMemberCards.value
-    .filter(profile => profile.totalRequests > 0 || profile.enabled)
-    .slice()
-    .sort((left, right) => {
-      if (right.totalTokens !== left.totalTokens) {
-        return right.totalTokens - left.totalTokens
-      }
-      if (right.totalRequests !== left.totalRequests) {
-        return right.totalRequests - left.totalRequests
-      }
-      return sortProfilesForDisplay(left, right)
-    })
-)
-const analyticsMemberOptions = computed(() =>
-  teamMemberCards.value.map(profile => ({
-    value: normalizeMemberCode(profile.memberCode),
-    label: buildProfileDisplayLabel(profile),
-    color: profile.cardColor || '#4c6ef5'
-  }))
-)
-const selectedTeamMemberLabel = computed(() =>
-  selectedTeamMemberCard.value?.displayLabel || $t('platform.openai.codexDialog.selectMember')
+const focusedMemberRow = computed(() =>
+  memberTableRows.value.find(profile => profile.id === focusedMemberProfileId.value) || null
 )
 const filteredDailyStatsSeries = computed(() =>
-  filterTeamSeriesByVisibleMembers(dailyStatsSeries.value, visibleAnalyticsMemberCodes.value)
+  buildSelectedProfileSeries({
+    series: dailyStatsSeries.value,
+    selectedProfileIds: selectedMemberProfileIds.value,
+    profiles: memberTableRows.value
+  })
 )
-const filteredMemberRankingRows = computed(() =>
-  filterMemberRankingByVisibleMembers(memberRankingRows.value, visibleAnalyticsMemberCodes.value)
+const selectedMemberCount = computed(() => selectedMemberProfileIds.value.length)
+const allMembersSelected = computed(() =>
+  memberTableRows.value.length > 0 && selectedMemberCount.value === memberTableRows.value.length
 )
-const analyticsVisibleMembersLabel = computed(() => {
-  const allCodes = analyticsMemberOptions.value.map(option => option.value).filter(Boolean)
-  const currentCodes = visibleAnalyticsMemberCodes.value.filter(Boolean)
-
-  if (currentCodes.length === 0 || currentCodes.length === allCodes.length) {
-    return $t('platform.openai.codexDialog.allVisibleMembers')
-  }
-
-  if (currentCodes.length === 1) {
-    return analyticsMemberOptions.value.find(option => option.value === currentCodes[0])?.label || currentCodes[0]
-  }
-
-  return $t('platform.openai.codexDialog.visibleMembersCount', { count: currentCodes.length })
-})
+const memberSelectionLabel = computed(() =>
+  allMembersSelected.value
+    ? $t('platform.openai.codexDialog.allVisibleMembers')
+    : $t('platform.openai.codexDialog.selectedMembersCount', { count: selectedMemberCount.value })
+)
 const teamSummaryCards = computed(() => ({
-  enabledMembers: teamMemberCards.value.filter(profile => profile.enabled).length,
-  todayRequests: teamMemberCards.value.reduce((sum, profile) => sum + profile.todayRequests, 0),
-  todayTokens: teamMemberCards.value.reduce((sum, profile) => sum + profile.todayTokens, 0)
+  enabledMembers: memberTableRows.value.filter(profile => profile.enabled).length,
+  todayRequests: memberTableRows.value.reduce((sum, profile) => sum + profile.todayRequests, 0),
+  todayTokens: memberTableRows.value.reduce((sum, profile) => sum + profile.todayTokens, 0)
 }))
 const logMemberOptions = computed(() =>
-  teamGatewayProfiles.value.map(profile => ({
-    value: profile.memberCode,
-    label: buildProfileDisplayLabel(profile)
-  }))
+  memberTableRows.value
+    .filter(profile => profile.memberCode)
+    .reduce((options, profile) => {
+      if (!options.some(option => option.value === profile.memberCode)) {
+        options.push({
+          value: profile.memberCode,
+          label: profile.displayLabel
+        })
+      }
+      return options
+    }, [])
+)
+const activeEditorProfileId = computed(() =>
+  memberEditorState.value.mode === 'edit' ? String(memberEditorState.value.profile?.id || '').trim() : ''
+)
+const isMemberEditorBusy = computed(() =>
+  memberEditorState.value.mode === 'create'
+    ? isCreatingProfile.value
+    : isProfileBusy(activeEditorProfileId.value)
 )
 
 const applyPoolStatus = (rawStatus) => {
@@ -1123,32 +906,6 @@ const formatPercent = (value) => `${Number(value || 0).toFixed(1)}%`
 
 const normalizeMemberCode = (value) => String(value || '').trim().toLowerCase()
 
-const extractKeySuffix = (apiKey) => {
-  const trimmed = String(apiKey || '').trim()
-  if (!trimmed) {
-    return ''
-  }
-  const segments = trimmed.split('-').filter(Boolean)
-  return segments[segments.length - 1] || trimmed.slice(-8)
-}
-
-const isBuiltinTeamProfile = (profile) =>
-  TEAM_MEMBER_ORDER.includes(String(profile?.memberCode || '').trim().toLowerCase())
-
-const teamMemberOrderIndex = (profile) => {
-  const normalized = String(profile?.memberCode || '').trim().toLowerCase()
-  const index = TEAM_MEMBER_ORDER.indexOf(normalized)
-  return index >= 0 ? index : Number.MAX_SAFE_INTEGER
-}
-
-const sortProfilesForDisplay = (left, right) => {
-  const orderDiff = teamMemberOrderIndex(left) - teamMemberOrderIndex(right)
-  if (orderDiff !== 0) {
-    return orderDiff
-  }
-  return String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN')
-}
-
 const buildProfileDisplayLabel = (profile) => {
   const parts = [profile?.name, profile?.memberCode, profile?.roleTitle]
     .map(value => String(value || '').trim())
@@ -1167,27 +924,8 @@ const buildLogDisplayLabel = (log) => {
   return parts.length > 0 ? parts.join(' · ') : '-'
 }
 
-const syncTeamDashboardState = (profiles) => {
-  if (!Array.isArray(profiles) || profiles.length === 0) {
-    selectedTeamMemberId.value = ''
-    visibleAnalyticsMemberCodes.value = []
-    return
-  }
-
-  if (!profiles.some(profile => profile.id === selectedTeamMemberId.value)) {
-    selectedTeamMemberId.value = profiles[0].id
-  }
-
-  const allCodes = profiles
-    .map(profile => normalizeMemberCode(profile.memberCode))
-    .filter(Boolean)
-
-  const keptVisibleCodes = visibleAnalyticsMemberCodes.value
-    .map(normalizeMemberCode)
-    .filter(code => allCodes.includes(code))
-
-  visibleAnalyticsMemberCodes.value = keptVisibleCodes.length > 0 ? keptVisibleCodes : allCodes
-}
+const isResettableTeamMember = (profile) =>
+  TEAM_MEMBER_ORDER.includes(normalizeMemberCode(profile?.memberCode))
 
 const getTodayStartTs = () => {
   const start = new Date()
@@ -1289,11 +1027,9 @@ const normalizeGatewayProfile = (profile) => {
 
 const cleanupProfileMaps = (profiles) => {
   const validIds = new Set(profiles.map(profile => profile.id))
-  const filterByIds = (source) =>
-    Object.fromEntries(Object.entries(source).filter(([id]) => validIds.has(id)))
-
-  profileBusyState.value = filterByIds(profileBusyState.value)
-  visibleProfileKeys.value = filterByIds(visibleProfileKeys.value)
+  profileBusyState.value = Object.fromEntries(
+    Object.entries(profileBusyState.value).filter(([id]) => validIds.has(id))
+  )
 }
 
 const setProfileBusy = (profileId, busy) => {
@@ -1307,25 +1043,6 @@ const setProfileBusy = (profileId, busy) => {
 }
 
 const isProfileBusy = (profileId) => !!profileBusyState.value[profileId]
-
-const toggleProfileKeyVisibility = (profileId) => {
-  visibleProfileKeys.value = {
-    ...visibleProfileKeys.value,
-    [profileId]: !visibleProfileKeys.value[profileId]
-  }
-}
-
-const isProfileKeyVisible = (profileId) => !!visibleProfileKeys.value[profileId]
-
-const ensureGatewayProfileApiKey = (profile) => {
-  const apiKey = String(profile?.apiKey || '').trim()
-  if (apiKey) {
-    return apiKey
-  }
-
-  window.$notify?.error($t('platform.openai.codexDialog.apiKeyRequired'))
-  return null
-}
 
 const loadServerStatus = async () => {
   const raw = await invoke('get_codex_server_status')
@@ -1379,102 +1096,170 @@ const loadAccounts = async () => {
   }
 }
 
-const persistGatewayProfile = async (profile, { notifySuccess = false, successMessage = '' } = {}) => {
-  const apiKey = ensureGatewayProfileApiKey(profile)
-  if (!apiKey || !profile?.id) {
+const normalizeOptionalGatewayField = (value) => {
+  const trimmed = String(value || '').trim()
+  return trimmed || null
+}
+
+const buildEmptyMemberDraft = () => ({
+  id: '',
+  name: '',
+  apiKey: '',
+  enabled: true,
+  isPrimary: false,
+  memberCode: '',
+  roleTitle: '',
+  personaSummary: '',
+  color: '#4c6ef5',
+  notes: ''
+})
+
+const buildGatewayProfileMutationPayload = (profile, { allowGeneratedApiKey = false } = {}) => {
+  const name = String(profile?.name || '').trim()
+  const memberCode = String(profile?.memberCode || '').trim()
+  const apiKey = normalizeOptionalGatewayField(profile?.apiKey)
+
+  if (!name) {
+    window.$notify?.error($t('platform.openai.codexDialog.memberNameRequired'))
     return null
+  }
+  if (!memberCode) {
+    window.$notify?.error($t('platform.openai.codexDialog.memberCodeRequired'))
+    return null
+  }
+  if (!allowGeneratedApiKey && !apiKey) {
+    window.$notify?.error($t('platform.openai.codexDialog.apiKeyRequired'))
+    return null
+  }
+
+  return {
+    name,
+    apiKey,
+    enabled: profile?.enabled !== false,
+    memberCode,
+    roleTitle: normalizeOptionalGatewayField(profile?.roleTitle),
+    personaSummary: normalizeOptionalGatewayField(profile?.personaSummary),
+    color: normalizeOptionalGatewayField(profile?.color),
+    notes: normalizeOptionalGatewayField(profile?.notes)
+  }
+}
+
+const openCreateMemberEditor = () => {
+  memberEditorState.value = {
+    visible: true,
+    mode: 'create',
+    profile: buildEmptyMemberDraft()
+  }
+}
+
+const openEditMemberEditor = (profile) => {
+  memberEditorState.value = {
+    visible: true,
+    mode: 'edit',
+    profile: normalizeGatewayProfile(profile)
+  }
+}
+
+const closeMemberEditor = () => {
+  if (isMemberEditorBusy.value) {
+    return
+  }
+  memberEditorState.value = {
+    visible: false,
+    mode: 'create',
+    profile: null
+  }
+}
+
+const toggleGatewayProfile = async (profile, enabled) => {
+  const payload = buildGatewayProfileMutationPayload(
+    { ...profile, enabled },
+    { allowGeneratedApiKey: false }
+  )
+  if (!payload || !profile?.id) {
+    return
   }
 
   setProfileBusy(profile.id, true)
   try {
-    const updated = await invoke('update_codex_gateway_profile', {
+    await invoke('update_codex_gateway_profile', {
       profileId: profile.id,
-      name: profile.name,
-      apiKey,
-      enabled: profile.enabled,
-      memberCode: profile.memberCode || null,
-      roleTitle: profile.roleTitle || null,
-      personaSummary: profile.personaSummary || null,
-      color: profile.color || null,
-      notes: profile.notes || null
+      ...payload
     })
     await Promise.all([
       loadGatewayProfiles(),
       loadAccessConfig(),
       loadMemberAnalytics({ force: true })
     ])
-
-    if (notifySuccess && successMessage) {
-      window.$notify?.success(successMessage)
-    }
-
-    return normalizeGatewayProfile(updated)
+  } catch (error) {
+    console.error('Failed to toggle Codex gateway profile:', error)
+    window.$notify?.error(
+      $t('platform.openai.codexDialog.updateKeyFailed', { error: error?.message || error })
+    )
   } finally {
     setProfileBusy(profile.id, false)
   }
 }
 
-const createGatewayProfile = async () => {
-  if (isCreatingProfile.value) {
+const saveMemberEditor = async (profile) => {
+  if (!profile) {
     return
   }
 
-  isCreatingProfile.value = true
+  if (memberEditorState.value.mode === 'create') {
+    const payload = buildGatewayProfileMutationPayload(profile, { allowGeneratedApiKey: true })
+    if (!payload) {
+      return
+    }
+
+    isCreatingProfile.value = true
+    try {
+      await invoke('create_codex_gateway_profile', payload)
+      await Promise.all([
+        loadGatewayProfiles(),
+        loadAccessConfig(),
+        loadDailyStats(),
+        loadMemberAnalytics({ force: true })
+      ])
+      closeMemberEditor()
+      window.$notify?.success($t('platform.openai.codexDialog.createKeySuccess'))
+    } catch (error) {
+      console.error('Failed to create Codex gateway profile:', error)
+      window.$notify?.error(
+        $t('platform.openai.codexDialog.createKeyFailed', { error: error?.message || error })
+      )
+    } finally {
+      isCreatingProfile.value = false
+    }
+    return
+  }
+
+  const payload = buildGatewayProfileMutationPayload(profile, { allowGeneratedApiKey: false })
+  if (!payload || !profile?.id) {
+    return
+  }
+
+  setProfileBusy(profile.id, true)
   try {
-    const created = normalizeGatewayProfile(await invoke('create_codex_gateway_profile', {
-      name: null,
-      apiKey: null,
-      enabled: true
-    }))
+    await invoke('update_codex_gateway_profile', {
+      profileId: profile.id,
+      ...payload
+    })
     await Promise.all([
       loadGatewayProfiles(),
       loadAccessConfig(),
+      loadDailyStats(),
       loadMemberAnalytics({ force: true })
     ])
-    visibleProfileKeys.value = {
-      ...visibleProfileKeys.value,
-      [created.id]: true
-    }
-    window.$notify?.success($t('platform.openai.codexDialog.createKeySuccess'))
-  } catch (error) {
-    console.error('Failed to create Codex gateway profile:', error)
-    window.$notify?.error(
-      $t('platform.openai.codexDialog.createKeyFailed', { error: error?.message || error })
-    )
-  } finally {
-    isCreatingProfile.value = false
-  }
-}
-
-const saveGatewayProfile = async (profile) => {
-  try {
-    await persistGatewayProfile(profile, {
-      notifySuccess: true,
-      successMessage: $t('platform.openai.codexDialog.saveKeySuccess')
-    })
+    closeMemberEditor()
+    window.$notify?.success($t('platform.openai.codexDialog.saveKeySuccess'))
   } catch (error) {
     console.error('Failed to save Codex gateway profile:', error)
     window.$notify?.error(
       $t('platform.openai.codexDialog.saveKeyFailed', { error: error?.message || error })
     )
-  }
-}
-
-const toggleGatewayProfile = async (profile, enabled) => {
-  const previousEnabled = profile.enabled
-  profile.enabled = enabled
-
-  try {
-    const updated = await persistGatewayProfile(profile)
-    if (!updated) {
-      profile.enabled = previousEnabled
-    }
-  } catch (error) {
-    profile.enabled = previousEnabled
-    console.error('Failed to toggle Codex gateway profile:', error)
-    window.$notify?.error(
-      $t('platform.openai.codexDialog.updateKeyFailed', { error: error?.message || error })
-    )
+  } finally {
+    setProfileBusy(profile.id, false)
   }
 }
 
@@ -1500,8 +1285,12 @@ const deleteGatewayProfile = async (profile) => {
     await Promise.all([
       loadGatewayProfiles(),
       loadAccessConfig(),
+      loadDailyStats(),
       loadMemberAnalytics({ force: true })
     ])
+    if (activeEditorProfileId.value === profile.id) {
+      closeMemberEditor()
+    }
     window.$notify?.success($t('platform.openai.codexDialog.deleteKeySuccess'))
   } catch (error) {
     console.error('Failed to delete Codex gateway profile:', error)
@@ -1523,13 +1312,10 @@ const regenerateGatewayProfileKey = async (profile) => {
     await invoke('regenerate_codex_gateway_profile_api_key', {
       profileId: profile.id
     })
-    visibleProfileKeys.value = {
-      ...visibleProfileKeys.value,
-      [profile.id]: true
-    }
     await Promise.all([
       loadGatewayProfiles(),
       loadAccessConfig(),
+      loadDailyStats(),
       loadMemberAnalytics({ force: true })
     ])
     window.$notify?.success($t('platform.openai.codexDialog.generateApiKeySuccess'))
@@ -1606,45 +1392,33 @@ const copyGatewayAccess = async (profile) => {
 const copyAllGatewayAccess = async () => {
   const payload = buildAllMembersAccessBundle({
     baseUrl: publicServerUrl,
-    profiles: teamMemberCards.value
+    profiles: memberTableRows.value
   })
   await copyText(payload)
 }
 
-const selectTeamMember = (profileId, close) => {
-  selectedTeamMemberId.value = profileId
-  close()
-}
-
-const isAnalyticsMemberVisible = (memberCode) =>
-  visibleAnalyticsMemberCodes.value.includes(normalizeMemberCode(memberCode))
-
-const showAllAnalyticsMembers = () => {
-  visibleAnalyticsMemberCodes.value = analyticsMemberOptions.value
-    .map(option => option.value)
-    .filter(Boolean)
-}
-
-const toggleAnalyticsMemberVisibility = (memberCode) => {
-  const normalizedCode = normalizeMemberCode(memberCode)
-  if (!normalizedCode) {
-    return
-  }
-
-  const current = new Set(visibleAnalyticsMemberCodes.value.map(normalizeMemberCode).filter(Boolean))
-  if (current.has(normalizedCode)) {
-    current.delete(normalizedCode)
+const toggleMemberSelection = (profileId) => {
+  const next = new Set(selectedMemberProfileIds.value)
+  if (next.has(profileId)) {
+    next.delete(profileId)
   } else {
-    current.add(normalizedCode)
+    next.add(profileId)
   }
+  selectedMemberProfileIds.value = [...next]
+}
 
-  const nextVisibleCodes = analyticsMemberOptions.value
-    .map(option => option.value)
-    .filter(code => current.has(code))
+const isMemberSelected = (profileId) => selectedMemberProfileIds.value.includes(profileId)
 
-  visibleAnalyticsMemberCodes.value = nextVisibleCodes.length > 0
-    ? nextVisibleCodes
-    : analyticsMemberOptions.value.map(option => option.value).filter(Boolean)
+const clearMemberSelection = () => {
+  selectedMemberProfileIds.value = []
+}
+
+const selectAllMembers = () => {
+  selectedMemberProfileIds.value = memberTableRows.value.map(profile => profile.id)
+}
+
+const setFocusedMember = (profileId) => {
+  focusedMemberProfileId.value = profileId
 }
 
 const getStrategyLabel = (value) => {
@@ -1743,8 +1517,16 @@ watch(logModelFilter, () => {
   }, 500)
 })
 
-watch(teamMemberCards, (profiles) => {
-  syncTeamDashboardState(profiles)
+watch(memberTableRows, (profiles, previousProfiles) => {
+  selectedMemberProfileIds.value = syncSelectedProfileIds({
+    profiles,
+    previousProfiles,
+    selectedProfileIds: selectedMemberProfileIds.value
+  })
+  focusedMemberProfileId.value = resolveFocusedProfileId({
+    profiles,
+    focusedProfileId: focusedMemberProfileId.value
+  })
 }, { immediate: true })
 
 const loadDailyStats = async () => {

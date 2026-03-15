@@ -4,6 +4,7 @@
 venv/
 node_modules/
 target/
+src-tauri/target*/
 dist/
 .cursor/
 .claude/
@@ -12,6 +13,7 @@ dist/
 .vite/
 nul
 /temp/
+.env.relay
 src-tauri/resources/cliproxy-server
 sidecars/cliproxy/apps/server-go/cli-proxy-api
 sidecars/cliproxy/apps/server-go/logs/

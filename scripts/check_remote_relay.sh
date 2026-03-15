@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/load_relay_env.sh"
+load_relay_env
+
 REMOTE_HOST="${ATM_RELAY_HOST:-}"
 REMOTE_PORT="${ATM_RELAY_REMOTE_PORT:-19090}"
-LOCAL_BASE_URL="${ATM_RELAY_LOCAL_BASE_URL:-http://127.0.0.1:8766/v1/models}"
-PUBLIC_BASE_URL="${ATM_RELAY_PUBLIC_BASE_URL:-https://your-relay.example.com/v1/models}"
+LOCAL_BASE_URL="${ATM_RELAY_LOCAL_BASE_URL:-http://127.0.0.1:8766/v1}"
+PUBLIC_BASE_URL="${ATM_RELAY_PUBLIC_BASE_URL:-https://your-relay.example.com/v1}"
+LOCAL_MODELS_URL="${LOCAL_BASE_URL%/}/models"
+PUBLIC_MODELS_URL="${PUBLIC_BASE_URL%/}/models"
 API_KEY="${ATM_RELAY_API_KEY:-}"
 auth_args=()
 
@@ -18,7 +25,7 @@ if [[ -n "$API_KEY" ]]; then
 fi
 
 echo "== Local ATM =="
-curl -sS -D - "$LOCAL_BASE_URL" "${auth_args[@]}" -o /tmp/atm-relay-local-body
+curl -sS -D - "$LOCAL_MODELS_URL" "${auth_args[@]}" -o /tmp/atm-relay-local-body
 head -40 /tmp/atm-relay-local-body
 echo
 
@@ -38,5 +45,5 @@ fi
 echo
 
 echo "== Public HTTPS =="
-curl -sS -D - "$PUBLIC_BASE_URL" "${auth_args[@]}" -o /tmp/atm-relay-public-body
+curl -sS -D - "$PUBLIC_MODELS_URL" "${auth_args[@]}" -o /tmp/atm-relay-public-body
 head -40 /tmp/atm-relay-public-body
