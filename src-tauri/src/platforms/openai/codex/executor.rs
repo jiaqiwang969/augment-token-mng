@@ -65,13 +65,6 @@ impl CodexExecutor {
             return Err(CodexError::NoAvailableAccount);
         }
 
-        let mapped_path = map_upstream_path(&request.path)?;
-        let upstream_url = build_upstream_url(
-            &self.upstream_origin,
-            &mapped_path,
-            request.query.as_deref(),
-        );
-
         let mut attempted_ids = HashSet::new();
         let mut selection_budget = active_count.saturating_mul(3).max(1);
         let mut last_transport_error: Option<reqwest::Error> = None;
@@ -85,6 +78,24 @@ impl CodexExecutor {
             if !attempted_ids.insert(account.id.clone()) {
                 continue;
             }
+
+            // 根据账号类型决定上游 URL
+            let upstream_url = if account.is_api_account {
+                let base = account.api_base_url.as_deref().unwrap_or("");
+                let api_path = map_api_upstream_path(&request.path);
+                build_upstream_url(
+                    base.trim_end_matches('/'),
+                    &api_path,
+                    request.query.as_deref(),
+                )
+            } else {
+                let mapped_path = map_upstream_path(&request.path)?;
+                build_upstream_url(
+                    &self.upstream_origin,
+                    &mapped_path,
+                    request.query.as_deref(),
+                )
+            };
 
             let meta = ForwardMeta {
                 account_id: account.id.clone(),
@@ -162,6 +173,22 @@ fn map_upstream_path(path: &str) -> Result<String, CodexError> {
     )))
 }
 
+/// API 账号直接透传 OpenAI 兼容路径，不做 /backend-api/codex 映射。
+/// 因为 api_base_url 通常已包含 /v1（如 https://code.ppchat.vip/v1），
+/// 所以需要去掉请求路径中的 /v1 前缀，避免拼出 /v1/v1/responses。
+fn map_api_upstream_path(path: &str) -> String {
+    if let Some(tail) = path.strip_prefix("/v1") {
+        // "/v1/responses" -> "/responses", "/v1" -> ""
+        if tail.is_empty() {
+            String::new()
+        } else {
+            tail.to_string()
+        }
+    } else {
+        path.to_string()
+    }
+}
+
 fn build_upstream_url(origin: &str, path: &str, raw_query: Option<&str>) -> String {
     let mut url = format!("{}{}", origin, path);
     if let Some(query) = raw_query.map(str::trim).filter(|q| !q.is_empty()) {
@@ -198,18 +225,25 @@ fn apply_forward_headers(
         builder = builder.header(name, value.clone());
     }
 
-    builder = builder
-        .header("Authorization", format!("Bearer {}", account.access_token))
-        .header("chatgpt-account-id", account.chatgpt_account_id.clone());
+    if account.is_api_account {
+        // API 账号：只设 Authorization，不设 chatgpt-account-id / originator
+        builder = builder.header("Authorization", format!("Bearer {}", account.access_token));
+    } else {
+        // OAuth 账号：原有逻辑
+        builder = builder
+            .header("Authorization", format!("Bearer {}", account.access_token))
+            .header("chatgpt-account-id", account.chatgpt_account_id.clone());
+
+        if !has_originator {
+            builder = builder.header("originator", "codex_cli_rs");
+        }
+    }
 
     if !has_user_agent {
         builder = builder.header("User-Agent", "codex_cli_rs/0.98.0");
     }
     if !has_openai_beta {
         builder = builder.header("OpenAI-Beta", "responses=experimental");
-    }
-    if !has_originator {
-        builder = builder.header("originator", "codex_cli_rs");
     }
 
     builder

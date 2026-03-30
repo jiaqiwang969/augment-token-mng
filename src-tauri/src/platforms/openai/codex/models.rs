@@ -70,16 +70,28 @@ pub struct CodexPoolAccount {
     pub tag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag_color: Option<String>,
+
+    // ===== API 账号专用 =====
+    /// API 账号的 base URL（如 https://code.ppchat.vip/v1）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base_url: Option<String>,
+    /// API 账号的 API key
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// 是否为 API 类型账号
+    #[serde(default)]
+    pub is_api_account: bool,
+    /// Wire API 类型 (responses / chat)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_api: Option<String>,
 }
 
 impl CodexPoolAccount {
     /// 从 OpenAI Account 转换为 CodexPoolAccount
-    /// 返回 None 表示账号不可用（API 账号、无 token、被禁用等）
+    /// 返回 None 表示账号不可用（无 token、被禁用等）
     pub fn from_openai_account(
         account: &crate::platforms::openai::models::Account,
     ) -> Option<Self> {
-        let token = account.token.as_ref()?;
-
         // 跳过被禁用的账号
         if account
             .quota
@@ -89,6 +101,48 @@ impl CodexPoolAccount {
         {
             return None;
         }
+
+        // API 类型账号：从 api_config 构建
+        if account.account_type == crate::platforms::openai::models::AccountType::API {
+            let api_config = account.api_config.as_ref()?;
+            let base_url = api_config.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+            let key = api_config.key.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+
+            return Some(Self {
+                id: account.id.clone(),
+                email: account.email.clone(),
+                access_token: key.to_string(),
+                refresh_token: None,
+                id_token: None,
+                expires_at: i64::MAX,
+                chatgpt_account_id: account.email.clone(),
+                chatgpt_user_id: None,
+                organization_id: None,
+                is_active: true,
+                is_forbidden: false,
+                last_used: Some(account.last_used),
+                last_refresh: None,
+                cooldown_until: None,
+                unavailable_reason: None,
+                last_error_status: None,
+                daily_quota: None,
+                used_quota: 0,
+                total_tokens_used: 0,
+                codex_5h_used_percent: None,
+                codex_7d_used_percent: None,
+                plan_type: Some("api".to_string()),
+                subscription_expires_at: None,
+                tag: account.tag.clone(),
+                tag_color: account.tag_color.clone(),
+                api_base_url: Some(base_url.to_string()),
+                api_key: Some(key.to_string()),
+                is_api_account: true,
+                wire_api: api_config.wire_api.clone(),
+            });
+        }
+
+        // OAuth 类型账号：原有逻辑
+        let token = account.token.as_ref()?;
 
         // 解析 openai_auth_json 中的订阅信息
         let (plan_type, subscription_expires_at) = account
@@ -149,11 +203,18 @@ impl CodexPoolAccount {
             subscription_expires_at,
             tag: account.tag.clone(),
             tag_color: account.tag_color.clone(),
+            api_base_url: None,
+            api_key: None,
+            is_api_account: false,
+            wire_api: None,
         })
     }
 
     /// 检查是否需要刷新 token
     pub fn needs_refresh(&self) -> bool {
+        if self.is_api_account {
+            return false;
+        }
         let now = chrono::Utc::now().timestamp();
         // 提前 5 分钟刷新
         self.expires_at - now < 300
@@ -161,6 +222,9 @@ impl CodexPoolAccount {
 
     /// 检查 token 是否已过期
     pub fn is_expired(&self) -> bool {
+        if self.is_api_account {
+            return false;
+        }
         let now = chrono::Utc::now().timestamp();
         self.expires_at <= now
     }

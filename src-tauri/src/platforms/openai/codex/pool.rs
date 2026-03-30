@@ -90,10 +90,24 @@ impl CodexPool {
 
         let strategy = *self.strategy.read().await;
 
+        // 优先使用 OAuth（PLUS）账号，只有全部不可用时才 fallback 到 API 账号
+        let oauth_only: Vec<CodexPoolAccount> = pool
+            .iter()
+            .filter(|a| !a.is_api_account)
+            .cloned()
+            .collect();
+        let has_available_oauth = oauth_only.iter().any(|a| a.is_available());
+
+        let effective_pool = if has_available_oauth {
+            &oauth_only
+        } else {
+            &*pool
+        };
+
         match strategy {
-            PoolStrategy::RoundRobin => self.select_round_robin(&pool).await,
-            PoolStrategy::Single => self.select_single(&pool).await,
-            PoolStrategy::Smart => self.select_smart(&pool).await,
+            PoolStrategy::RoundRobin => self.select_round_robin(effective_pool).await,
+            PoolStrategy::Single => self.select_single(effective_pool).await,
+            PoolStrategy::Smart => self.select_smart(effective_pool).await,
         }
     }
 
