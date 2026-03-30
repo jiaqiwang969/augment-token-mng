@@ -554,7 +554,7 @@ mod tests {
                 id: "codex-jdd".into(),
                 name: "姜大大".into(),
                 target: GatewayTarget::Codex,
-                api_key: "sk-team-jdd-a4f29c7e".into(),
+                api_key: "sk-team-jdd-placeholder1".into(),
                 enabled: true,
                 member_code: Some("jdd".into()),
                 role_title: Some("产品与方法论".into()),

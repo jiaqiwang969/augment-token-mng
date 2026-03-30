@@ -82,7 +82,7 @@ Recommended shape:
   "id": "codex-jdd",
   "name": "姜大大",
   "target": "codex",
-  "api_key": "sk-team-jdd-a4f29c7e",
+  "api_key": "sk-team-jdd-placeholder1",
   "enabled": true,
   "memberCode": "jdd",
   "roleTitle": "产品与方法论",
@@ -102,8 +102,8 @@ Each team member gets a readable but random key:
 
 Examples:
 
-- `sk-team-jdd-a4f29c7e`
-- `sk-team-jqw-3f8d10ab`
+- `sk-team-jdd-placeholder1`
+- `sk-team-jqw-xxxxxxxx`
 
 Rules:
 

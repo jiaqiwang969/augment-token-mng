@@ -813,7 +813,7 @@ mod tests {
                     Some("jqw"),
                     Some("架构与趋势"),
                     Some("佳琪 · jqw · 架构与趋势"),
-                    Some("sk-team-jqw-3f8d10ab"),
+                    Some("sk-team-jqw-placeholder2"),
                     Some("#0ea5e9"),
                 ),
             ])

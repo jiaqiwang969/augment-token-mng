@@ -362,7 +362,7 @@ test('buildAllMembersAccessBundle emits one public bundle block per member', asy
       {
         name: '佳琪',
         memberCode: 'jqw',
-        apiKey: 'sk-team-jqw-def67890'
+        apiKey: 'sk-team-jqw-placeholder1'
       }
     ]
   })
@@ -371,7 +371,7 @@ test('buildAllMembersAccessBundle emits one public bundle block per member', asy
   assert.match(output, /OPENAI_BASE_URL=https:\/\/lingkong\.xyz\/v1/)
   assert.match(output, /OPENAI_API_KEY=sk-team-jdd-abc12345/)
   assert.match(output, /# 佳琪 · jqw/)
-  assert.match(output, /OPENAI_API_KEY=sk-team-jqw-def67890/)
+  assert.match(output, /OPENAI_API_KEY=sk-team-jqw-placeholder1/)
 })
 
 test('buildTeamMemberRows merges analytics and sorts built-in members before custom rows', async () => {
@@ -393,7 +393,7 @@ test('buildTeamMemberRows merges analytics and sorts built-in members before cus
         name: '佳琪',
         memberCode: 'jqw',
         roleTitle: '架构与趋势',
-        apiKey: 'sk-team-jqw-3f8d10ab',
+        apiKey: 'sk-team-jqw-placeholder2',
         enabled: true,
         color: '#0ea5e9'
       },
@@ -402,7 +402,7 @@ test('buildTeamMemberRows merges analytics and sorts built-in members before cus
         name: '姜大大',
         memberCode: 'jdd',
         roleTitle: '产品与方法论',
-        apiKey: 'sk-team-jdd-a4f29c7e',
+        apiKey: 'sk-team-jdd-placeholder1',
         enabled: false,
         color: '#4c6ef5'
       }
