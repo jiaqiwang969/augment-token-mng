@@ -28,14 +28,20 @@ func TestLoadConfigOptional_AddsDefaultAntigravityAliasesInMemoryWhenKeyMissing(
 	}
 
 	found := false
+	foundFlashImage := false
 	for _, entry := range aliases {
 		if entry.Name == "gemini-3.1-pro-high" && entry.Alias == "gemini-3.1-pro-preview" {
 			found = true
-			break
+		}
+		if entry.Name == "gemini-3.1-flash-image" && entry.Alias == "gemini-3.1-flash-image-preview" {
+			foundFlashImage = true
 		}
 	}
 	if !found {
 		t.Fatalf("expected gemini-3.1-pro-preview alias in defaults, got %#v", aliases)
+	}
+	if !foundFlashImage {
+		t.Fatalf("expected gemini-3.1-flash-image-preview alias in defaults, got %#v", aliases)
 	}
 
 	data, err := os.ReadFile(configFile)

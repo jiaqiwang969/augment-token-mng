@@ -105,8 +105,16 @@ impl CodexPoolAccount {
         // API 类型账号：从 api_config 构建
         if account.account_type == crate::platforms::openai::models::AccountType::API {
             let api_config = account.api_config.as_ref()?;
-            let base_url = api_config.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
-            let key = api_config.key.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+            let base_url = api_config
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            let key = api_config
+                .key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
 
             return Some(Self {
                 id: account.id.clone(),

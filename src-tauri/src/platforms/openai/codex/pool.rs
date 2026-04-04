@@ -2,7 +2,7 @@
 //!
 //! 管理用于 Codex API 请求的 OAuth 账号池，支持轮询和单个选择策略
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -83,6 +83,15 @@ impl CodexPool {
 
     /// 获取下一个可用账号
     pub async fn next_account(&self) -> Option<CodexPoolAccount> {
+        let excluded = HashSet::new();
+        self.next_account_excluding(&excluded).await
+    }
+
+    /// 获取下一个可用账号，但跳过本轮请求中已尝试过的账号。
+    pub async fn next_account_excluding(
+        &self,
+        excluded_account_ids: &HashSet<String>,
+    ) -> Option<CodexPoolAccount> {
         let pool = self.accounts.read().await;
         if pool.is_empty() {
             return None;
@@ -90,8 +99,17 @@ impl CodexPool {
 
         let strategy = *self.strategy.read().await;
 
-        // 优先使用 OAuth（PLUS）账号，只有全部不可用时才 fallback 到 API 账号
-        let oauth_only: Vec<CodexPoolAccount> = pool
+        let filtered_pool: Vec<CodexPoolAccount> = pool
+            .iter()
+            .filter(|a| !excluded_account_ids.contains(&a.id))
+            .cloned()
+            .collect();
+        if !filtered_pool.iter().any(|a| a.is_available()) {
+            return None;
+        }
+
+        // 优先使用 OAuth（PLUS）账号；仅当本轮未尝试的 OAuth 都不可用或已尝试完时，才 fallback 到 API 账号。
+        let oauth_only: Vec<CodexPoolAccount> = filtered_pool
             .iter()
             .filter(|a| !a.is_api_account)
             .cloned()
@@ -101,18 +119,29 @@ impl CodexPool {
         let effective_pool = if has_available_oauth {
             &oauth_only
         } else {
-            &*pool
+            &filtered_pool
         };
 
         match strategy {
             PoolStrategy::RoundRobin => self.select_round_robin(effective_pool).await,
-            PoolStrategy::Single => self.select_single(effective_pool).await,
+            // Single 模式允许固定到显式选中的 API 账号，不受 OAuth 优先池限制。
+            PoolStrategy::Single => {
+                if self.selected_account_id.read().await.is_some() {
+                    self.select_single(filtered_pool.as_slice()).await
+                } else {
+                    self.select_single(effective_pool).await
+                }
+            }
             PoolStrategy::Smart => self.select_smart(effective_pool).await,
         }
     }
 
     /// 轮询选择
     async fn select_round_robin(&self, pool: &[CodexPoolAccount]) -> Option<CodexPoolAccount> {
+        if pool.is_empty() {
+            return None;
+        }
+
         let mut index = self.current_index.write().await;
 
         // 过滤出可用账号
@@ -122,13 +151,19 @@ impl CodexPool {
             return None;
         }
 
+        *index %= pool.len();
+
         // 找到当前索引对应的账号
+        let start = *index;
         let account = loop {
-            let acc = pool.get(*index)?;
+            let acc = &pool[*index];
             if acc.is_available() {
                 break acc;
             }
             *index = (*index + 1) % pool.len();
+            if *index == start {
+                return None;
+            }
         };
 
         *index = (*index + 1) % pool.len();
@@ -393,6 +428,151 @@ impl CodexPool {
 impl Default for CodexPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn build_pool_account(id: &str, email: &str, is_api_account: bool) -> CodexPoolAccount {
+        CodexPoolAccount {
+            id: id.to_string(),
+            email: email.to_string(),
+            access_token: format!("token-{id}"),
+            refresh_token: None,
+            id_token: None,
+            expires_at: if is_api_account {
+                i64::MAX
+            } else {
+                chrono::Utc::now().timestamp() + 3600
+            },
+            chatgpt_account_id: format!("chatgpt-{id}"),
+            chatgpt_user_id: None,
+            organization_id: None,
+            is_active: true,
+            is_forbidden: false,
+            last_used: None,
+            last_refresh: None,
+            cooldown_until: None,
+            unavailable_reason: None,
+            last_error_status: None,
+            daily_quota: None,
+            used_quota: 0,
+            total_tokens_used: 0,
+            codex_5h_used_percent: None,
+            codex_7d_used_percent: None,
+            plan_type: if is_api_account {
+                Some("api".to_string())
+            } else {
+                Some("plus".to_string())
+            },
+            subscription_expires_at: None,
+            tag: None,
+            tag_color: None,
+            api_base_url: is_api_account.then(|| "https://api.example.com/v1".to_string()),
+            api_key: is_api_account.then(|| format!("sk-{id}")),
+            is_api_account,
+            wire_api: is_api_account.then(|| "responses".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_strategy_uses_selected_api_account_even_when_oauth_exists() {
+        let pool = CodexPool::new();
+        pool.add_account(build_pool_account("oauth-1", "oauth@example.com", false))
+            .await;
+        pool.add_account(build_pool_account("api-1", "api@example.com", true))
+            .await;
+        pool.set_strategy(PoolStrategy::Single).await;
+        pool.set_selected_account_id("api-1".to_string()).await;
+
+        let selected = pool.next_account().await.expect("selected account");
+
+        assert_eq!(selected.id, "api-1");
+        assert!(selected.is_api_account);
+    }
+
+    #[tokio::test]
+    async fn single_strategy_without_explicit_selection_still_prefers_oauth_pool() {
+        let pool = CodexPool::new();
+        pool.add_account(build_pool_account("api-1", "api@example.com", true))
+            .await;
+        pool.add_account(build_pool_account("oauth-1", "oauth@example.com", false))
+            .await;
+        pool.set_strategy(PoolStrategy::Single).await;
+
+        let selected = pool.next_account().await.expect("default account");
+
+        assert_eq!(selected.id, "oauth-1");
+        assert!(!selected.is_api_account);
+    }
+
+    #[tokio::test]
+    async fn smart_strategy_falls_back_to_api_after_oauth_candidates_are_exhausted() {
+        let pool = CodexPool::new();
+        pool.add_account(build_pool_account("oauth-1", "oauth-1@example.com", false))
+            .await;
+        pool.add_account(build_pool_account("oauth-2", "oauth-2@example.com", false))
+            .await;
+        pool.add_account(build_pool_account("api-1", "api@example.com", true))
+            .await;
+        pool.set_strategy(PoolStrategy::Smart).await;
+
+        let mut excluded = HashSet::new();
+
+        let first = pool
+            .next_account_excluding(&excluded)
+            .await
+            .expect("first smart account");
+        excluded.insert(first.id.clone());
+        assert!(!first.is_api_account);
+
+        let second = pool
+            .next_account_excluding(&excluded)
+            .await
+            .expect("second smart account");
+        excluded.insert(second.id.clone());
+        assert!(!second.is_api_account);
+
+        let fallback = pool
+            .next_account_excluding(&excluded)
+            .await
+            .expect("api fallback after oauth candidates");
+        assert_eq!(fallback.id, "api-1");
+        assert!(fallback.is_api_account);
+    }
+
+    #[tokio::test]
+    async fn round_robin_fallback_handles_filtered_pool_after_index_advance() {
+        let pool = CodexPool::new();
+        pool.add_account(build_pool_account("oauth-1", "oauth-1@example.com", false))
+            .await;
+        pool.add_account(build_pool_account("oauth-2", "oauth-2@example.com", false))
+            .await;
+        pool.add_account(build_pool_account("api-1", "api@example.com", true))
+            .await;
+        pool.set_strategy(PoolStrategy::RoundRobin).await;
+
+        let first = pool
+            .next_account()
+            .await
+            .expect("first round robin account");
+        let second = pool
+            .next_account()
+            .await
+            .expect("second round robin account");
+        assert_eq!(first.id, "oauth-1");
+        assert_eq!(second.id, "oauth-2");
+
+        let excluded = HashSet::from(["oauth-1".to_string(), "oauth-2".to_string()]);
+        let fallback = pool
+            .next_account_excluding(&excluded)
+            .await
+            .expect("api fallback after oauth exclusion");
+        assert_eq!(fallback.id, "api-1");
+        assert!(fallback.is_api_account);
     }
 }
 

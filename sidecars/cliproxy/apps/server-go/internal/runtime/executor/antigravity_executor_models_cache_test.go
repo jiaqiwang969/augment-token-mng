@@ -18,7 +18,7 @@ func TestStoreAntigravityPrimaryModels_EmptyDoesNotOverwrite(t *testing.T) {
 
 	seed := []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5"},
-		{ID: "gemini-2.5-pro"},
+		{ID: "gpt-5"},
 	}
 	if updated := storeAntigravityPrimaryModels(seed); !updated {
 		t.Fatal("expected non-empty model list to update primary cache")
@@ -35,7 +35,7 @@ func TestStoreAntigravityPrimaryModels_EmptyDoesNotOverwrite(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected cached model count 2, got %d", len(got))
 	}
-	if got[0].ID != "claude-sonnet-4-5" || got[1].ID != "gemini-2.5-pro" {
+	if got[0].ID != "claude-sonnet-4-5" || got[1].ID != "gpt-5" {
 		t.Fatalf("unexpected cached model ids: %q, %q", got[0].ID, got[1].ID)
 	}
 }
@@ -86,5 +86,44 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 	}
 	if again[0].Thinking == nil || len(again[0].Thinking.Levels) == 0 || again[0].Thinking.Levels[0] != "high" {
 		t.Fatalf("expected cached model thinking levels to be unmutated, got %v", again[0].Thinking)
+	}
+}
+
+func TestEnsureAntigravityPublicImageModels_AddsMissingFlashImagePreviewModel(t *testing.T) {
+	input := []*registry.ModelInfo{
+		{ID: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash"},
+		{ID: "gemini-3.1-pro-preview", DisplayName: "Gemini 3.1 Pro Preview"},
+	}
+
+	got := ensureAntigravityPublicImageModels(input)
+
+	want := map[string]struct{}{
+		"gemini-2.5-flash":               {},
+		"gemini-3.1-pro-preview":         {},
+		"gemini-3.1-flash-image-preview": {},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("model count = %d, want %d", len(got), len(want))
+	}
+
+	seen := map[string]*registry.ModelInfo{}
+	for _, model := range got {
+		if model == nil {
+			continue
+		}
+		seen[model.ID] = model
+	}
+	for id := range want {
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("expected model %q in augmented antigravity primary models", id)
+		}
+	}
+
+	model := seen["gemini-3.1-flash-image-preview"]
+	if model == nil {
+		t.Fatal("missing model gemini-3.1-flash-image-preview")
+	}
+	if len(model.SupportedGenerationMethods) == 0 || model.SupportedGenerationMethods[0] != "generateContent" {
+		t.Fatalf("expected generateContent support for %q, got %v", model.ID, model.SupportedGenerationMethods)
 	}
 }

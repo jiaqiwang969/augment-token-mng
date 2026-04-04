@@ -70,6 +70,39 @@ func TestGetRequestDetailsForContext_RestrictsScopedProviderAndAuth(t *testing.T
 	}
 }
 
+func TestGetRequestDetailsForContext_FallsBackToScopedProviderWhenAuthSupportsModel(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	reg := registry.GetGlobalRegistry()
+	const scopedAuthID = "handlers-scope-antigravity-preview"
+	reg.UnregisterClient(scopedAuthID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(scopedAuthID)
+	})
+
+	// Characterization setup: the scoped auth supports the requested model,
+	// but the registration currently has no provider attached, so global
+	// provider lookup returns empty while scope-based visibility still allows it.
+	reg.RegisterClient(scopedAuthID, "", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-image-preview"},
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	ctx := newScopedHandlerContext(t, "antigravity", scopedAuthID)
+
+	providers, model, errMsg := handler.getRequestDetailsForContext(ctx, "gemini-3.1-flash-image-preview")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetailsForContext() unexpected error = %v", errMsg)
+	}
+	if len(providers) != 1 || providers[0] != "antigravity" {
+		t.Fatalf("providers = %v, want [antigravity]", providers)
+	}
+	if model != "gemini-3.1-flash-image-preview" {
+		t.Fatalf("model = %q, want %q", model, "gemini-3.1-flash-image-preview")
+	}
+}
+
 func newScopedHandlerContext(t *testing.T, provider, authID string) context.Context {
 	t.Helper()
 

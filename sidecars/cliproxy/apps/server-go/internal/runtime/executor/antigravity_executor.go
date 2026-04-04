@@ -94,6 +94,12 @@ func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
 	if len(model.SupportedParameters) > 0 {
 		clone.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
+	if len(model.SupportedInputModalities) > 0 {
+		clone.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
+	}
+	if len(model.SupportedOutputModalities) > 0 {
+		clone.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
+	}
 	if model.Thinking != nil {
 		thinkingClone := *model.Thinking
 		if len(model.Thinking.Levels) > 0 {
@@ -104,8 +110,66 @@ func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
 	return &clone
 }
 
+var antigravitySupplementalPublicImageModelIDs = []string{
+	"gemini-3.1-flash-image-preview",
+}
+
+func ensureAntigravityPublicImageModels(models []*registry.ModelInfo) []*registry.ModelInfo {
+	augmented := cloneAntigravityModels(models)
+	if len(augmented) == 0 {
+		return nil
+	}
+	hasGeminiBaseModel := false
+	seen := make(map[string]struct{}, len(augmented))
+	for _, model := range augmented {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+		if strings.HasPrefix(strings.ToLower(id), "gemini-") {
+			hasGeminiBaseModel = true
+		}
+	}
+	if !hasGeminiBaseModel {
+		return augmented
+	}
+
+	for _, modelID := range antigravitySupplementalPublicImageModelIDs {
+		if _, ok := seen[modelID]; ok {
+			continue
+		}
+		base := registry.LookupStaticModelInfo(modelID)
+		if base == nil {
+			continue
+		}
+		model := cloneAntigravityModelInfo(base)
+		if model == nil {
+			continue
+		}
+		model.ID = modelID
+		model.Object = "model"
+		model.Created = time.Now().Unix()
+		model.OwnedBy = antigravityAuthType
+		model.Type = antigravityAuthType
+		if strings.TrimSpace(model.DisplayName) == "" {
+			model.DisplayName = modelID
+		}
+		if strings.TrimSpace(model.Description) == "" {
+			model.Description = model.DisplayName
+		}
+		augmented = append(augmented, model)
+		seen[modelID] = struct{}{}
+	}
+
+	return augmented
+}
+
 func storeAntigravityPrimaryModels(models []*registry.ModelInfo) bool {
-	cloned := cloneAntigravityModels(models)
+	cloned := ensureAntigravityPublicImageModels(models)
 	if len(cloned) == 0 {
 		return false
 	}
@@ -119,7 +183,7 @@ func loadAntigravityPrimaryModels() []*registry.ModelInfo {
 	antigravityPrimaryModelsCache.mu.RLock()
 	cloned := cloneAntigravityModels(antigravityPrimaryModelsCache.models)
 	antigravityPrimaryModelsCache.mu.RUnlock()
-	return cloned
+	return ensureAntigravityPublicImageModels(cloned)
 }
 
 func fallbackAntigravityPrimaryModels() []*registry.ModelInfo {
@@ -1303,12 +1367,13 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			}
 			models = append(models, modelInfo)
 		}
+		models = ensureAntigravityPublicImageModels(models)
 		if len(models) == 0 {
 			if idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: empty models list on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
-			log.Debug("antigravity executor: fetched empty model list; retaining cached primary model list")
+			log.Debug("antigravity executor: fetched empty models list after augmentation; retaining cached primary model list")
 			return fallbackAntigravityPrimaryModels()
 		}
 		storeAntigravityPrimaryModels(models)

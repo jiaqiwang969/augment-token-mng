@@ -279,14 +279,15 @@ async fn handle_passthrough_internal(
         let (upstream_response, meta) = match executor.forward(forward_request).await {
             Ok(ok) => ok,
             Err(err) => {
-                let is_no_account = matches!(err, CodexError::NoAvailableAccount);
-                let err_text = err.to_string();
+                let is_no_account = matches!(&err.error, CodexError::NoAvailableAccount);
+                let err_text = err.error.to_string();
                 add_failed_log(
                     logger.clone(),
                     storage.clone(),
                     &request_model,
                     &request_format,
                     err_text.clone(),
+                    err.last_meta.as_ref(),
                     gateway_profile.as_ref(),
                 )
                 .await;
@@ -341,6 +342,7 @@ async fn handle_passthrough_internal(
                         &request_model,
                         &request_format,
                         err_text.clone(),
+                        Some(&meta),
                         gateway_profile.as_ref(),
                     )
                     .await;
@@ -469,6 +471,7 @@ async fn handle_passthrough_internal(
                     &request_model,
                     &request_format,
                     err_text.clone(),
+                    Some(&meta),
                     gateway_profile.as_ref(),
                 )
                 .await;
@@ -758,11 +761,12 @@ fn build_streaming_response_with_metrics(
         } else {
             request_model
         };
-        let error_message = if status.is_success() {
-            None
-        } else {
-            extractor.error_message
-        };
+        let (log_status, error_message) = resolve_stream_log_outcome(
+            status,
+            extractor.error_message,
+            stream_interrupted,
+            stream_error.clone(),
+        );
         if let Some(archive_store) = archive_storage.as_ref() {
             let _ = if stream_interrupted {
                 archive_capture.finish_with_stream_error(
@@ -773,11 +777,7 @@ fn build_streaming_response_with_metrics(
                 )
             } else {
                 archive_capture.finish_response(
-                    if status.is_success() {
-                        "success"
-                    } else {
-                        "error"
-                    },
+                    log_status,
                     error_message.clone(),
                     archive_usage_from(usage),
                     archive_store.as_ref(),
@@ -787,11 +787,7 @@ fn build_streaming_response_with_metrics(
         let log = build_request_log(
             &meta,
             log_model,
-            if status.is_success() {
-                "success"
-            } else {
-                "error"
-            },
+            log_status,
             usage,
             error_message,
             gateway_profile.as_ref(),
@@ -1346,6 +1342,64 @@ fn build_request_log(
     }
 }
 
+fn build_failed_request_log(
+    model: &str,
+    format: &str,
+    error: String,
+    failed_meta: Option<&ForwardMeta>,
+    gateway_profile: Option<&GatewayAccessProfile>,
+) -> RequestLog {
+    let metadata = build_gateway_profile_log_metadata(gateway_profile);
+
+    RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
+        account_id: failed_meta
+            .map(|meta| meta.account_id.clone())
+            .unwrap_or_default(),
+        account_email: failed_meta
+            .map(|meta| meta.account_email.clone())
+            .unwrap_or_default(),
+        model: model.to_string(),
+        format: format.to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        status: "error".to_string(),
+        error_message: Some(error),
+        request_duration_ms: failed_meta.map(|meta| meta.started_at.elapsed().as_millis() as i64),
+        gateway_profile_id: metadata.gateway_profile_id,
+        gateway_profile_name: metadata.gateway_profile_name,
+        member_code: metadata.member_code,
+        role_title: metadata.role_title,
+        display_label: metadata.display_label,
+        api_key_suffix: metadata.api_key_suffix,
+        color: metadata.color,
+    }
+}
+
+fn resolve_stream_log_outcome(
+    status: StatusCode,
+    extractor_error: Option<String>,
+    stream_interrupted: bool,
+    stream_error: Option<String>,
+) -> (&'static str, Option<String>) {
+    if stream_interrupted {
+        return (
+            "error",
+            stream_error
+                .or(extractor_error)
+                .or_else(|| Some("Stream interrupted".to_string())),
+        );
+    }
+
+    if status.is_success() {
+        ("success", None)
+    } else {
+        ("error", extractor_error)
+    }
+}
+
 async fn record_log(
     logger: Arc<RwLock<RequestLogger>>,
     storage: Option<Arc<CodexLogStorage>>,
@@ -1389,30 +1443,10 @@ async fn add_failed_log(
     model: &str,
     format: &str,
     error: String,
+    failed_meta: Option<&ForwardMeta>,
     gateway_profile: Option<&GatewayAccessProfile>,
 ) {
-    let metadata = build_gateway_profile_log_metadata(gateway_profile);
-    let log = RequestLog {
-        id: uuid::Uuid::new_v4().to_string(),
-        timestamp: chrono::Utc::now().timestamp(),
-        account_id: String::new(),
-        account_email: String::new(),
-        model: model.to_string(),
-        format: format.to_string(),
-        input_tokens: 0,
-        output_tokens: 0,
-        total_tokens: 0,
-        status: "error".to_string(),
-        error_message: Some(error),
-        request_duration_ms: None,
-        gateway_profile_id: metadata.gateway_profile_id,
-        gateway_profile_name: metadata.gateway_profile_name,
-        member_code: metadata.member_code,
-        role_title: metadata.role_title,
-        display_label: metadata.display_label,
-        api_key_suffix: metadata.api_key_suffix,
-        color: metadata.color,
-    };
+    let log = build_failed_request_log(model, format, error, failed_meta, gateway_profile);
     let mut guard = logger.write().await;
     guard.add_log(log.clone());
 
@@ -1628,6 +1662,55 @@ mod tests {
         assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
         assert_eq!(row["api_key_suffix"], "a4f29c7e");
         assert_eq!(row["color"], "#4c6ef5");
+    }
+
+    #[test]
+    fn build_failed_request_log_uses_last_attempted_account_when_present() {
+        let meta = ForwardMeta {
+            account_id: "account-2".to_string(),
+            account_email: "failed@example.com".to_string(),
+            format: "openai-responses".to_string(),
+            model: "gpt-5.4".to_string(),
+            started_at: std::time::Instant::now(),
+        };
+
+        let log = build_failed_request_log(
+            "gpt-5.4",
+            "openai-responses",
+            "Execution error: boom".to_string(),
+            Some(&meta),
+            None,
+        );
+        let row = serde_json::to_value(&log).unwrap();
+
+        assert_eq!(row["account_id"], "account-2");
+        assert_eq!(row["account_email"], "failed@example.com");
+        assert_eq!(row["status"], "error");
+        assert!(row["request_duration_ms"].as_i64().unwrap_or_default() >= 0);
+    }
+
+    #[test]
+    fn resolve_stream_log_outcome_marks_interrupted_success_status_as_error() {
+        let (status, error) = resolve_stream_log_outcome(
+            StatusCode::OK,
+            None,
+            true,
+            Some("Failed to read upstream stream chunk: boom".to_string()),
+        );
+
+        assert_eq!(status, "error");
+        assert_eq!(
+            error.as_deref(),
+            Some("Failed to read upstream stream chunk: boom")
+        );
+    }
+
+    #[test]
+    fn resolve_stream_log_outcome_keeps_clean_success_without_error_message() {
+        let (status, error) = resolve_stream_log_outcome(StatusCode::OK, None, false, None);
+
+        assert_eq!(status, "success");
+        assert!(error.is_none());
     }
 
     #[test]

@@ -106,6 +106,14 @@ test('relay nginx template includes v1beta Gemini native routes', async () => {
   assert.match(source, /proxy_pass http:\/\/127\.0\.0\.1:__ATM_RELAY_REMOTE_PORT__/)
 })
 
+test('relay nginx template includes Claude native routes for Codex-compatible access', async () => {
+  const templatePath = path.resolve('deploy/nginx/public-atm-relay.conf.template')
+  const source = await readFile(templatePath, 'utf8')
+
+  assert.match(source, /location = \/v1\/messages/)
+  assert.match(source, /location = \/v1\/messages\/count_tokens/)
+})
+
 test('upsertManagedRelayBlock replaces the legacy relay section', async () => {
   const { upsertManagedRelayBlock } = await loadModule()
 
@@ -173,6 +181,16 @@ test('check_remote_relay.sh fails fast on non-2xx responses and validates model 
   assert.match(source, /PROBE_LABEL/)
   assert.match(source, /Expected 2xx from \$\{PROBE_LABEL\}/)
   assert.match(source, /python3 -/)
+})
+
+test('check_remote_relay.sh probes Claude native routes with Anthropic-style requests', async () => {
+  const scriptPath = path.resolve('scripts/check_remote_relay.sh')
+  const source = await readFile(scriptPath, 'utf8')
+
+  assert.match(source, /\/v1\/messages/)
+  assert.match(source, /\/v1\/messages\/count_tokens/)
+  assert.match(source, /anthropic-version/i)
+  assert.match(source, /invalid_request_error/)
 })
 
 test('load_relay_env.sh preserves explicit environment overrides over file defaults', async () => {

@@ -56,6 +56,19 @@ pub struct BatchImportResult {
     pub results: Vec<ImportResult>,
 }
 
+/// OpenAI 账号导入请求
+#[derive(Debug, Deserialize)]
+pub struct OpenAIImportRequest {
+    pub email: String,
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub id_token: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
 /// 健康检查响应
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -411,6 +424,16 @@ fn unified_responses_request_filter()
     unified_post_request_filter(warp::path!("v1" / "responses"))
 }
 
+fn unified_messages_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "messages"))
+}
+
+fn unified_messages_count_tokens_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "messages" / "count_tokens"))
+}
+
 fn unified_chat_completions_request_filter()
 -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
     unified_post_request_filter(warp::path!("v1" / "chat" / "completions"))
@@ -595,6 +618,32 @@ fn unified_gateway_routes_from_state(
             )
         });
 
+    let messages_route = unified_messages_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_unified_gateway_request(
+                "/v1/messages".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
+    let messages_count_tokens_route = unified_messages_count_tokens_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_unified_gateway_request(
+                "/v1/messages/count_tokens".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                state,
+            )
+        });
+
     let chat_completions_route = unified_chat_completions_request_filter()
         .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
@@ -636,6 +685,8 @@ fn unified_gateway_routes_from_state(
 
     models_route
         .or(responses_route)
+        .or(messages_route)
+        .or(messages_count_tokens_route)
         .or(chat_completions_route)
         .or(v1beta_models_route)
         .or(v1beta_post_route)
@@ -1069,6 +1120,50 @@ async fn import_sessions_handler(
     }
 }
 
+// ==================== OpenAI 账号导入 ====================
+
+async fn openai_import_handler(
+    request: OpenAIImportRequest,
+    state: Arc<crate::AppState>,
+) -> Result<impl Reply, Rejection> {
+    println!("📥 API: Importing OpenAI account: {}", request.email);
+
+    let app_handle = state.app_handle.clone();
+
+    match crate::platforms::openai::commands::openai_import_account_direct(
+        app_handle,
+        request.email.clone(),
+        request.account_id,
+        request.access_token,
+        request.refresh_token,
+        request.id_token,
+    )
+    .await
+    {
+        Ok(account) => {
+            println!("✅ OpenAI account imported: {}", request.email);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({
+                    "success": true,
+                    "email": account.email,
+                    "id": account.id,
+                })),
+                warp::http::StatusCode::OK,
+            ))
+        }
+        Err(e) => {
+            println!("❌ OpenAI import failed: {}", e);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&ApiErrorResponse {
+                    error: e,
+                    code: "IMPORT_FAILED".to_string(),
+                }),
+                warp::http::StatusCode::BAD_REQUEST,
+            ))
+        }
+    }
+}
+
 // ==================== 服务器启动 ====================
 
 /// 启动 API 服务器（固定端口）
@@ -1125,10 +1220,19 @@ async fn try_bind_server(state: Arc<crate::AppState>, port: u16) -> Result<ApiSe
         .and(state_filter.clone())
         .and_then(import_sessions_handler);
 
+    // OpenAI 账号导入路由
+    let openai_import_route = warp::path!("api" / "openai" / "import")
+        .and(warp::post())
+        .and(warp::body::content_length_limit(1024 * 1024))
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(openai_import_handler);
+
     // API 子路由
     let api_routes = health_route
         .or(import_session_route)
         .or(import_sessions_route)
+        .or(openai_import_route)
         .boxed();
 
     // 统一 /v1/* 网关路由

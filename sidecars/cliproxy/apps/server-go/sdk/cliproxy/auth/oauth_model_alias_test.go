@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"reflect"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -202,5 +203,23 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	resolvedModel := mgr.applyOAuthModelAlias(auth, "gemini-2.5-pro(8192)")
 	if resolvedModel != "gemini-2.5-pro-exp-03-25(8192)" {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
+	}
+}
+
+func TestResolveOAuthUpstreamModelCandidates_PreservesSuffix(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"antigravity": {{Name: "gemini-3.1-flash-image", Alias: "gemini-3.1-flash-image-preview"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	got := mgr.ResolveOAuthUpstreamModelCandidates("gemini-3.1-flash-image-preview(high)")
+	want := []string{"gemini-3.1-flash-image(high)"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveOAuthUpstreamModelCandidates() = %v, want %v", got, want)
 	}
 }

@@ -57,6 +57,18 @@ fn unified_responses_request_filter()
 }
 
 #[cfg(test)]
+fn unified_messages_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "messages"))
+}
+
+#[cfg(test)]
+fn unified_messages_count_tokens_request_filter()
+-> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
+    unified_post_request_filter(warp::path!("v1" / "messages" / "count_tokens"))
+}
+
+#[cfg(test)]
 fn unified_chat_completions_request_filter()
 -> impl Filter<Extract = (Option<String>, HeaderMap, Bytes), Error = Rejection> + Clone {
     unified_post_request_filter(warp::path!("v1" / "chat" / "completions"))
@@ -199,6 +211,34 @@ fn unified_antigravity_routes(
             )
         });
 
+    let messages_route = unified_messages_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_antigravity_proxy(
+                "/v1/messages".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                None,
+                state,
+            )
+        });
+
+    let messages_count_tokens_route = unified_messages_count_tokens_request_filter()
+        .and(state_filter.clone())
+        .and_then(|query, headers, body, state| {
+            handle_antigravity_proxy(
+                "/v1/messages/count_tokens".to_string(),
+                Method::POST,
+                query,
+                headers,
+                body,
+                None,
+                state,
+            )
+        });
+
     let chat_completions_route = unified_chat_completions_request_filter()
         .and(state_filter.clone())
         .and_then(|query, headers, body, state| {
@@ -227,6 +267,8 @@ fn unified_antigravity_routes(
 
     models_route
         .or(responses_route)
+        .or(messages_route)
+        .or(messages_count_tokens_route)
         .or(chat_completions_route)
         .or(v1beta_models_route)
         .or(v1beta_post_route)
@@ -269,7 +311,11 @@ async fn handle_antigravity_proxy(
     let client = reqwest::Client::new();
     let request_body = body.clone();
     let request_format = infer_request_format(&raw_path);
-    let request_model = extract_model_from_json_bytes(&request_body).unwrap_or_default();
+    let request_model = extract_model_from_json_bytes(&request_body)
+        .or_else(|| extract_model_from_path(&raw_path))
+        .unwrap_or_default();
+    let request_started_at = std::time::Instant::now();
+    let log_account = resolve_log_account(&accounts).cloned();
     let mut req_builder = client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST),
         &upstream_url,
@@ -309,6 +355,8 @@ async fn handle_antigravity_proxy(
             upstream_response,
             request_format,
             request_model,
+            request_started_at,
+            log_account,
             gateway_profile.clone(),
             state.log_storage_dir.clone(),
         )
@@ -332,7 +380,9 @@ async fn handle_antigravity_proxy(
         builder = builder.header(name, value);
     }
 
-    let model = extract_model_from_json_bytes(&body_bytes).unwrap_or(request_model);
+    let model = extract_model_from_json_bytes(&body_bytes)
+        .or_else(|| extract_model_from_path(&raw_path))
+        .unwrap_or_else(|| request_model.clone());
     let usage = extract_usage_from_json_bytes(&body_bytes);
     let error_message = if upstream_status.is_success() {
         None
@@ -349,6 +399,8 @@ async fn handle_antigravity_proxy(
         },
         usage,
         error_message,
+        Some(elapsed_millis(request_started_at)),
+        log_account.as_ref(),
         gateway_profile.as_ref(),
     );
     persist_request_log(state.log_storage_dir.clone(), log).await;
@@ -420,17 +472,11 @@ impl SseUsageExtractor {
     }
 
     fn extract_fields(&mut self, value: &Value) {
-        let is_completed = value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("response.completed"));
-        if !is_completed {
-            return;
-        }
-
         if let Some(usage) = value
             .pointer("/response/usage")
             .or_else(|| value.get("usage"))
+            .or_else(|| value.pointer("/response/usageMetadata"))
+            .or_else(|| value.get("usageMetadata"))
         {
             self.usage = usage_stats_from_value(usage);
         }
@@ -445,6 +491,11 @@ fn extract_usage_from_json_bytes(body: &Bytes) -> UsageStats {
     let Some(usage) = root
         .get("usage")
         .or_else(|| root.get("response").and_then(|value| value.get("usage")))
+        .or_else(|| root.get("usageMetadata"))
+        .or_else(|| {
+            root.get("response")
+                .and_then(|value| value.get("usageMetadata"))
+        })
     else {
         return UsageStats::default();
     };
@@ -456,15 +507,21 @@ fn usage_stats_from_value(usage: &Value) -> UsageStats {
     let input_tokens = to_i64(
         usage
             .get("input_tokens")
-            .or_else(|| usage.get("prompt_tokens")),
+            .or_else(|| usage.get("prompt_tokens"))
+            .or_else(|| usage.get("promptTokenCount")),
     );
     let output_tokens = to_i64(
         usage
             .get("output_tokens")
-            .or_else(|| usage.get("completion_tokens")),
+            .or_else(|| usage.get("completion_tokens"))
+            .or_else(|| usage.get("candidatesTokenCount")),
     );
     let total_tokens = {
-        let explicit_total = to_i64(usage.get("total_tokens"));
+        let explicit_total = to_i64(
+            usage
+                .get("total_tokens")
+                .or_else(|| usage.get("totalTokenCount")),
+        );
         if explicit_total > 0 {
             explicit_total
         } else {
@@ -576,15 +633,21 @@ fn build_request_log(
     status: &str,
     usage: UsageStats,
     error_message: Option<String>,
+    request_duration_ms: Option<i64>,
+    log_account: Option<&crate::platforms::antigravity::models::Account>,
     gateway_profile: Option<&crate::core::gateway_access::GatewayAccessProfile>,
 ) -> crate::platforms::antigravity::api_service::models::RequestLog {
     let metadata = build_gateway_profile_log_metadata(gateway_profile);
+    let (account_id, account_email) = match log_account {
+        Some(account) => (account.id.clone(), account.email.clone()),
+        None => ("antigravity-sidecar".to_string(), String::new()),
+    };
 
     crate::platforms::antigravity::api_service::models::RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
         timestamp: chrono::Utc::now().timestamp(),
-        account_id: "antigravity-sidecar".to_string(),
-        account_email: String::new(),
+        account_id,
+        account_email,
         model,
         format: format.to_string(),
         input_tokens: usage.input_tokens,
@@ -592,7 +655,7 @@ fn build_request_log(
         total_tokens: usage.total_tokens,
         status: status.to_string(),
         error_message,
-        request_duration_ms: None,
+        request_duration_ms,
         gateway_profile_id: metadata.gateway_profile_id,
         gateway_profile_name: metadata.gateway_profile_name,
         member_code: metadata.member_code,
@@ -613,6 +676,30 @@ fn extract_model_from_json_bytes(body: &Bytes) -> Option<String> {
                 .and_then(|model| model.as_str())
                 .map(str::to_string)
         })
+}
+
+fn extract_model_from_path(path: &str) -> Option<String> {
+    let (_, tail) = path.split_once("/v1beta/models/")?;
+    let model = tail.split(':').next().unwrap_or_default().trim();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
+fn resolve_log_account(
+    accounts: &[crate::platforms::antigravity::models::Account],
+) -> Option<&crate::platforms::antigravity::models::Account> {
+    if accounts.len() == 1 {
+        accounts.first()
+    } else {
+        None
+    }
+}
+
+fn elapsed_millis(started_at: std::time::Instant) -> i64 {
+    i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
 fn extract_error_message(body: &Bytes) -> Option<String> {
@@ -681,6 +768,8 @@ fn build_streaming_response(
     response: reqwest::Response,
     request_format: &'static str,
     request_model: String,
+    request_started_at: std::time::Instant,
+    log_account: Option<crate::platforms::antigravity::models::Account>,
     gateway_profile: Option<crate::core::gateway_access::GatewayAccessProfile>,
     log_storage_dir: Option<PathBuf>,
 ) -> Result<Response<Body>, String> {
@@ -730,6 +819,8 @@ fn build_streaming_response(
             },
             usage_extractor.usage,
             None,
+            Some(elapsed_millis(request_started_at)),
+            log_account.as_ref(),
             gateway_profile.as_ref(),
         );
         persist_request_log(log_storage_dir, log).await;
@@ -859,6 +950,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length).decode("utf-8")
+
+        if self.path.startswith("/v1/messages/count_tokens"):
+            payload = {
+                "authorization": self.headers.get("Authorization"),
+                "path": self.path,
+                "body": body,
+                "input_tokens": 7,
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        if self.path.startswith("/v1/messages"):
+            payload = {
+                "authorization": self.headers.get("Authorization"),
+                "path": self.path,
+                "body": body,
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
 
         if self.path.startswith("/v1/chat/completions"):
             payload = {
@@ -991,6 +1111,17 @@ PY
     }
 
     #[test]
+    fn antigravity_usage_reads_gemini_usage_metadata() {
+        let usage = extract_usage_from_json_bytes(&Bytes::from_static(
+            br#"{"usageMetadata":{"promptTokenCount":315,"candidatesTokenCount":5,"totalTokenCount":320}}"#,
+        ));
+
+        assert_eq!(usage.total_tokens, 320);
+        assert_eq!(usage.input_tokens, 315);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
     fn antigravity_streaming_usage_only_finalizes_from_completed_event() {
         let mut extractor = SseUsageExtractor::default();
 
@@ -1017,7 +1148,29 @@ PY
     }
 
     #[test]
+    fn antigravity_streaming_usage_reads_gemini_usage_metadata() {
+        let mut extractor = SseUsageExtractor::default();
+
+        extractor.ingest_chunk(&Bytes::from_static(
+            br#"data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":315,"candidatesTokenCount":5,"totalTokenCount":320}}}
+
+"#,
+        ));
+        extractor.finish();
+
+        assert_eq!(
+            extractor.usage,
+            UsageStats {
+                input_tokens: 315,
+                output_tokens: 5,
+                total_tokens: 320,
+            }
+        );
+    }
+
+    #[test]
     fn antigravity_request_log_captures_member_identity_fields() {
+        let account = sample_account("jdd@lingkong.xyz");
         let profile = GatewayAccessProfile {
             id: "ant-jdd".to_string(),
             name: "姜大大".to_string(),
@@ -1041,10 +1194,15 @@ PY
                 total_tokens: 30,
             },
             None,
+            Some(987),
+            Some(&account),
             Some(&profile),
         );
         let row = serde_json::to_value(&log).unwrap();
 
+        assert_eq!(row["account_id"], account.id);
+        assert_eq!(row["account_email"], account.email);
+        assert_eq!(row["request_duration_ms"], 987);
         assert_eq!(row["member_code"], "jdd");
         assert_eq!(row["role_title"], "产品与方法论");
         assert_eq!(row["display_label"], "姜大大 · jdd · 产品与方法论");
@@ -1136,6 +1294,75 @@ PY
                 .as_str()
                 .unwrap()
                 .contains(r#""model":"claude-sonnet-4""#)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_unified_messages_route_replaces_authorization() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = unified_antigravity_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/v1/messages?beta=true")
+            .header("authorization", "Bearer user-token")
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(
+                r#"{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+            )
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(payload["path"], "/v1/messages?beta=true");
+
+        let authorization = payload["authorization"].as_str().unwrap();
+        assert!(authorization.starts_with("Bearer sk-atm-antigravity-internal-"));
+        assert_ne!(authorization, "Bearer user-token");
+        assert!(
+            payload["body"]
+                .as_str()
+                .unwrap()
+                .contains(r#""max_tokens":16"#)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_unified_count_tokens_route_replaces_authorization() {
+        let temp_dir = tempdir().unwrap();
+        let state = build_proxy_test_state(temp_dir.path()).await;
+        let route = unified_antigravity_routes(state.clone());
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/v1/messages/count_tokens")
+            .header("authorization", "Bearer user-token")
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}"#)
+            .reply(&route)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(payload["path"], "/v1/messages/count_tokens");
+        assert_eq!(payload["input_tokens"], 7);
+
+        let authorization = payload["authorization"].as_str().unwrap();
+        assert!(authorization.starts_with("Bearer sk-atm-antigravity-internal-"));
+        assert_ne!(authorization, "Bearer user-token");
+        assert!(
+            payload["body"]
+                .as_str()
+                .unwrap()
+                .contains(r#""model":"claude-sonnet-4-5""#)
         );
     }
 

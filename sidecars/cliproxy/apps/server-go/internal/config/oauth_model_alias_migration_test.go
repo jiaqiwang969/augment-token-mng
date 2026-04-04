@@ -116,8 +116,8 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	}
 
 	// Verify missing default aliases were supplemented
-	if !strings.Contains(content, "gemini-3-pro-image") {
-		t.Fatal("expected missing default alias gemini-3-pro-image to be added")
+	if !strings.Contains(content, "gemini-3.1-flash-image") {
+		t.Fatal("expected missing default alias gemini-3.1-flash-image to be added")
 	}
 	if !strings.Contains(content, "gemini-3-flash") {
 		t.Fatal("expected missing default alias gemini-3-flash to be added")

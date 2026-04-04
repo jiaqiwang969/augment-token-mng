@@ -94,6 +94,29 @@ pub fn create_proxy_client() -> Result<ProxyClient, String> {
     Ok(ProxyClient::new(client, edge_function_url))
 }
 
+/// 创建不设置总请求超时的代理客户端，适合长流式响应。
+pub fn create_proxy_client_without_request_timeout() -> Result<ProxyClient, String> {
+    let proxy_config = try_load_proxy_config();
+
+    let client = if let Some(config) = &proxy_config {
+        config.create_client_without_request_timeout()?
+    } else {
+        ProxyConfig::default().create_client_without_request_timeout()?
+    };
+
+    let edge_function_url = if let Some(config) = proxy_config {
+        if config.enabled && config.proxy_type == ProxyType::CustomUrl {
+            config.custom_url
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ProxyClient::new(client, edge_function_url))
+}
+
 /// 创建标准的 HTTP 客户端，自动加载代理配置
 ///
 /// 注意：对于 CustomUrl 类型（如 Supabase Edge Functions），

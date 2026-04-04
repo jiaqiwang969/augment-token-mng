@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -126,5 +127,38 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_ResolvesProviderViaOAuthAliasFallback(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	modelRegistry.RegisterClient("test-request-details-antigravity", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-image", Created: now},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-request-details-antigravity")
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{})
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"antigravity": {
+			{Name: "gemini-3.1-flash-image", Alias: "gemini-3.1-flash-image-preview"},
+		},
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	providers, model, errMsg := handler.getRequestDetails("gemini-3.1-flash-image-preview(high)")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"antigravity"}) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, []string{"antigravity"})
+	}
+	if model != "gemini-3.1-flash-image-preview(high)" {
+		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gemini-3.1-flash-image-preview(high)")
 	}
 }

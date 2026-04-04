@@ -104,9 +104,24 @@ impl ProxyConfig {
     /// 创建配置了代理的 reqwest 客户端
     pub fn create_client(&self) -> Result<reqwest::Client, String> {
         let (request_timeout, connect_timeout) = standard_client_timeouts();
-        let mut builder = reqwest::Client::builder()
-            .timeout(request_timeout)
-            .connect_timeout(connect_timeout);
+        self.create_client_with_timeouts(Some(request_timeout), connect_timeout)
+    }
+
+    /// 创建不设置总请求超时的客户端，适合长连接/SSE 请求。
+    pub fn create_client_without_request_timeout(&self) -> Result<reqwest::Client, String> {
+        let (_, connect_timeout) = standard_client_timeouts();
+        self.create_client_with_timeouts(None, connect_timeout)
+    }
+
+    fn create_client_with_timeouts(
+        &self,
+        request_timeout: Option<Duration>,
+        connect_timeout: Duration,
+    ) -> Result<reqwest::Client, String> {
+        let mut builder = reqwest::Client::builder().connect_timeout(connect_timeout);
+        if let Some(request_timeout) = request_timeout {
+            builder = builder.timeout(request_timeout);
+        }
 
         if self.enabled {
             match self.proxy_type {

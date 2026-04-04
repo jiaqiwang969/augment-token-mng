@@ -70,6 +70,74 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 	m.oauthModelAlias.Store(table)
 }
 
+// ResolveOAuthUpstreamModelCandidates returns upstream model candidates for a
+// requested OAuth alias across all configured OAuth channels. The returned
+// candidates preserve the caller's thinking suffix unless the configured
+// upstream model already includes its own suffix.
+func (m *Manager) ResolveOAuthUpstreamModelCandidates(requestedModel string) []string {
+	if m == nil {
+		return nil
+	}
+
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return nil
+	}
+
+	raw := m.oauthModelAlias.Load()
+	table, _ := raw.(*oauthModelAliasTable)
+	if table == nil || table.reverse == nil {
+		return nil
+	}
+
+	requestResult := thinking.ParseSuffix(requestedModel)
+	baseModel := strings.TrimSpace(requestResult.ModelName)
+	if baseModel == "" {
+		return nil
+	}
+
+	candidates := []string{baseModel}
+	if baseModel != requestedModel {
+		candidates = append(candidates, requestedModel)
+	}
+
+	preserveSuffix := func(resolved string) string {
+		resolved = strings.TrimSpace(resolved)
+		if resolved == "" {
+			return ""
+		}
+		if thinking.ParseSuffix(resolved).HasSuffix {
+			return resolved
+		}
+		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+			return resolved + "(" + requestResult.RawSuffix + ")"
+		}
+		return resolved
+	}
+
+	out := make([]string, 0, len(table.reverse))
+	seen := make(map[string]struct{})
+	for _, rev := range table.reverse {
+		for _, candidate := range candidates {
+			key := strings.ToLower(strings.TrimSpace(candidate))
+			if key == "" {
+				continue
+			}
+			resolved := preserveSuffix(rev[key])
+			if resolved == "" {
+				continue
+			}
+			resolvedKey := strings.ToLower(resolved)
+			if _, exists := seen[resolvedKey]; exists {
+				continue
+			}
+			seen[resolvedKey] = struct{}{}
+			out = append(out, resolved)
+		}
+	}
+	return out
+}
+
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {

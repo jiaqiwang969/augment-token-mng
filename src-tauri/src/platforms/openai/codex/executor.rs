@@ -11,7 +11,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use warp::http::HeaderMap;
 
 use super::pool::CodexPool;
-use crate::http_client::create_proxy_client;
+use crate::http_client::create_proxy_client_without_request_timeout;
 use crate::platforms::openai::codex::models::{CodexError, CodexPoolAccount};
 use crate::proxy_helper::ProxyClient;
 
@@ -37,6 +37,13 @@ pub struct ForwardMeta {
     pub started_at: Instant,
 }
 
+/// 透传执行失败，保留最后一次实际尝试的账号元信息，便于上层写准日志。
+#[derive(Debug)]
+pub struct ForwardError {
+    pub error: CodexError,
+    pub last_meta: Option<ForwardMeta>,
+}
+
 /// Codex API 执行器
 pub struct CodexExecutor {
     pool: Arc<CodexPool>,
@@ -46,7 +53,8 @@ pub struct CodexExecutor {
 
 impl CodexExecutor {
     pub fn new(pool: Arc<CodexPool>) -> Result<Self, String> {
-        let client = create_proxy_client()?;
+        // Codex Responses 长流可能超过默认 120s，保留连接超时但取消总请求超时。
+        let client = create_proxy_client_without_request_timeout()?;
 
         Ok(Self {
             pool,
@@ -59,25 +67,38 @@ impl CodexExecutor {
     pub async fn forward(
         &self,
         request: ForwardRequest,
-    ) -> Result<(reqwest::Response, ForwardMeta), CodexError> {
+    ) -> Result<(reqwest::Response, ForwardMeta), ForwardError> {
         let active_count = self.pool.active_count().await;
         if active_count == 0 {
-            return Err(CodexError::NoAvailableAccount);
+            return Err(ForwardError {
+                error: CodexError::NoAvailableAccount,
+                last_meta: None,
+            });
         }
 
         let mut attempted_ids = HashSet::new();
         let mut selection_budget = active_count.saturating_mul(3).max(1);
         let mut last_transport_error: Option<reqwest::Error> = None;
+        let mut last_attempted_meta: Option<ForwardMeta> = None;
 
         while attempted_ids.len() < active_count && selection_budget > 0 {
             selection_budget -= 1;
 
-            let Some(account) = self.pool.next_account().await else {
+            let Some(account) = self.pool.next_account_excluding(&attempted_ids).await else {
                 break;
             };
             if !attempted_ids.insert(account.id.clone()) {
                 continue;
             }
+
+            let meta = ForwardMeta {
+                account_id: account.id.clone(),
+                account_email: account.email.clone(),
+                format: request.format.clone(),
+                model: request.model.clone(),
+                started_at: Instant::now(),
+            };
+            last_attempted_meta = Some(meta.clone());
 
             // 根据账号类型决定上游 URL
             let upstream_url = if account.is_api_account {
@@ -89,20 +110,20 @@ impl CodexExecutor {
                     request.query.as_deref(),
                 )
             } else {
-                let mapped_path = map_upstream_path(&request.path)?;
+                let mapped_path = match map_upstream_path(&request.path) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(ForwardError {
+                            error: err,
+                            last_meta: Some(meta),
+                        });
+                    }
+                };
                 build_upstream_url(
                     &self.upstream_origin,
                     &mapped_path,
                     request.query.as_deref(),
                 )
-            };
-
-            let meta = ForwardMeta {
-                account_id: account.id.clone(),
-                account_email: account.email.clone(),
-                format: request.format.clone(),
-                model: request.model.clone(),
-                started_at: Instant::now(),
             };
 
             let response = match self.send_once(&upstream_url, &request, &account).await {
@@ -113,7 +134,10 @@ impl CodexExecutor {
                         last_transport_error = Some(err);
                         continue;
                     }
-                    return Err(CodexError::ExecutionError(format_transport_error(&err)));
+                    return Err(ForwardError {
+                        error: CodexError::ExecutionError(format_transport_error(&err)),
+                        last_meta: Some(meta),
+                    });
                 }
             };
 
@@ -135,10 +159,16 @@ impl CodexExecutor {
         }
 
         if let Some(err) = last_transport_error {
-            return Err(CodexError::ExecutionError(format_transport_error(&err)));
+            return Err(ForwardError {
+                error: CodexError::ExecutionError(format_transport_error(&err)),
+                last_meta: last_attempted_meta,
+            });
         }
 
-        Err(CodexError::NoAvailableAccount)
+        Err(ForwardError {
+            error: CodexError::NoAvailableAccount,
+            last_meta: last_attempted_meta,
+        })
     }
 
     async fn send_once(

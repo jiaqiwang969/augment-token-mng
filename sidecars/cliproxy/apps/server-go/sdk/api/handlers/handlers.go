@@ -790,7 +790,7 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func normalizeRequestModelName(modelName string) string {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -803,18 +803,47 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	} else {
 		resolvedModelName = util.ResolveAutoModel(modelName)
 	}
+	return resolvedModelName
+}
 
-	parsed := thinking.ParseSuffix(resolvedModelName)
-	baseModel := strings.TrimSpace(parsed.ModelName)
+func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	resolvedModelName := normalizeRequestModelName(modelName)
 
-	providers = util.GetProviderName(baseModel)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+	lookupProviders := func(candidateModel string) []string {
+		candidateModel = strings.TrimSpace(candidateModel)
+		if candidateModel == "" {
+			return nil
+		}
+
+		parsed := thinking.ParseSuffix(candidateModel)
+		baseModel := strings.TrimSpace(parsed.ModelName)
+		found := util.GetProviderName(baseModel)
+		// Fallback: if baseModel has no provider but differs from candidateModel,
+		// try using the full model name. This handles edge cases where custom models
+		// may be registered with their full suffixed name (e.g., "my-model(8192)").
+		// Evaluated in Story 11.8: This fallback is intentionally preserved to support
+		// custom model registrations that include thinking suffixes.
+		if len(found) == 0 && baseModel != candidateModel {
+			found = util.GetProviderName(candidateModel)
+		}
+		return found
+	}
+
+	providers = lookupProviders(resolvedModelName)
+	if len(providers) == 0 && h.AuthManager != nil {
+		seen := make(map[string]struct{})
+		for _, provider := range providers {
+			seen[provider] = struct{}{}
+		}
+		for _, candidate := range h.AuthManager.ResolveOAuthUpstreamModelCandidates(resolvedModelName) {
+			for _, provider := range lookupProviders(candidate) {
+				if _, exists := seen[provider]; exists {
+					continue
+				}
+				seen[provider] = struct{}{}
+				providers = append(providers, provider)
+			}
+		}
 	}
 
 	if len(providers) == 0 {
@@ -827,12 +856,28 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 }
 
 func (h *BaseAPIHandler) getRequestDetailsForContext(ctx context.Context, modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	scope := AccessScopeFromContext(ctx)
 	providers, normalizedModel, err = h.getRequestDetails(modelName)
 	if err != nil {
-		return nil, "", err
+		if err.StatusCode != http.StatusBadGateway || scope.Provider == "" || scope.AuthID == "" {
+			return nil, "", err
+		}
+
+		normalizedModel = normalizeRequestModelName(modelName)
+		baseModel := strings.TrimSpace(thinking.ParseSuffix(normalizedModel).ModelName)
+		if baseModel == "" {
+			baseModel = strings.TrimSpace(normalizedModel)
+		}
+
+		reg := registry.GetGlobalRegistry()
+		if !reg.ClientSupportsModel(scope.AuthID, baseModel) && !reg.ClientSupportsModel(scope.AuthID, normalizedModel) {
+			return nil, "", err
+		}
+
+		providers = []string{scope.Provider}
+		err = nil
 	}
 
-	scope := AccessScopeFromContext(ctx)
 	if scope.Provider != "" {
 		filteredProviders := filterProvidersByScope(providers, scope.Provider)
 		if len(filteredProviders) == 0 {

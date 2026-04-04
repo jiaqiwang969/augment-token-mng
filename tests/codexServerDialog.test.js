@@ -73,3 +73,13 @@ test('CodexServerDialog renders a token-share pie chart from filtered member ser
   assert.match(source, /const tokenShareSeries = computed\(\(\) =>\s*buildTokenShareSeries\(filteredDailyStatsSeries\.value\)\)/)
   assert.match(source, /<CodexUsagePieChart :chart-data="tokenShareSeries" \/>/)
 })
+
+test('CodexServerDialog keeps single-mode account choices open to usable API accounts', async () => {
+  const source = await readDialogSource()
+
+  assert.match(source, /const hasUsableApiConfig = \(account\) =>/)
+  assert.match(source, /account\.accountType === 'api'/)
+  assert.match(source, /account\.apiConfig\?\.baseUrl/)
+  assert.match(source, /account\.apiConfig\?\.key/)
+  assert.match(source, /availableAccounts\.value = accounts\.filter\(isSelectablePoolAccount\)/)
+})

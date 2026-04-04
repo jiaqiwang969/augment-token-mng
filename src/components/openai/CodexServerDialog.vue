@@ -1363,14 +1363,22 @@ const loadAccounts = async () => {
   try {
     const raw = await invoke('openai_list_accounts')
     const accounts = toCamel(raw)
-    // 过滤出可用的 OAuth 账号
-    availableAccounts.value = accounts.filter((a) =>
-      a.accountType === 'oauth' && a.token && !a.token.isExpired
-    )
+    availableAccounts.value = accounts.filter(isSelectablePoolAccount)
   } catch {
     availableAccounts.value = []
   }
 }
+
+const hasUsableOAuthToken = (account) =>
+  account.accountType === 'oauth' && account.token && !account.token.isExpired
+
+const hasUsableApiConfig = (account) =>
+  account.accountType === 'api'
+    && String(account.apiConfig?.baseUrl || '').trim()
+    && String(account.apiConfig?.key || '').trim()
+
+const isSelectablePoolAccount = (account) =>
+  hasUsableOAuthToken(account) || hasUsableApiConfig(account)
 
 const normalizeOptionalGatewayField = (value) => {
   const trimmed = String(value || '').trim()
